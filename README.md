@@ -3,7 +3,7 @@
 <br/>
 
 ## ✨ Installation Guide
-> The environment is based on `Ubuntu 22.04 LTS`.
+> The environment is based on `Ubuntu 22.04 LTS`, `Python 3.9.13`.
 <br/>
 
 ### ⚠️ Attach USB device from Windows to WSL2 using `usbipd`
@@ -133,5 +133,27 @@ arduino-cli core install arduino:avr
 Verify the Arduino Board
 ```bash
 arduino-cli board list
+```
+<br/>
+<br/>
+
+### 4️⃣ Install Python Packages
+Create a Conda Environment
+```bash
+conda create -n overdrive python=3.9.13 -y
+conda activate overdrive
+```
+<br/>
+
+Install GUI and Graphics Extension Libraries for OpenCV
+```bash
+sudo apt update
+sudo apt install libgl1-mesa-glx libglib2.0-0 -y
+```
+<br/>
+
+Install Python Packages
+```bash
+pip install rplidar-roboticia opencv-python pyserial matplotlib
 ```
 <br/>

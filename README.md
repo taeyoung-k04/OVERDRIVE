@@ -2,8 +2,29 @@
 > 2026 SKKU Autonomous Driving Competition
 <br/>
 
-## ✨ Quick Start
+## ✨ Installation Guide
 > The environment is based on `Ubuntu 22.04 LTS`.
+<br/>
+
+### ⚠️ Attach USB device from Windows to WSL2 using `usbipd`
+Install `usbipd` via PowerShell as Administrator
+```bash
+winget install --id dorssel.usbipd-win --exact
+```
+<br/>
+
+Reopen PowerShell as Administrator and List USB Devices
+```bash
+usbipd list
+```
+<br/>
+
+Identify LiDAR Bus ID and Attach to WSL2 (Keep this terminal open)
+```bash
+usbipd bind --busid 5-1
+usbipd attach --busid 5-1 --wsl --auto-attach
+```
+<br/>
 <br/>
 
 ### 1️⃣ Install ROS 2 Humble
@@ -60,27 +81,6 @@ Successful communication between the two nodes confirms that the ROS 2 Humble in
 <br/>
 <br/>
 
-### ⚠️ Attach USB device from Windows to WSL2 using `usbipd`
-Install `usbipd` via PowerShell as Administrator
-```bash
-winget install --id dorssel.usbipd-win --exact
-```
-<br/>
-
-Reopen PowerShell as Administrator and List USB Devices
-```bash
-usbipd list
-```
-<br/>
-
-Identify LiDAR Bus ID and Attach to WSL2 (Keep this terminal open)
-```bash
-usbipd bind --busid 5-1
-usbipd attach --busid 5-1 --wsl --auto-attach
-```
-<br/>
-<br/>
-
 ### 2️⃣ Install LiDAR Driver Package
 Install LiDAR Driver Package
 ```bash
@@ -101,8 +101,37 @@ ros2 launch rplidar_ros rplidar_a1_launch.py
 ```
 <br/>
 
-Verifying LiDAR Data Reception in new terminal
+Verify LiDAR Data Reception in new terminal
 ```bash
 ros2 topic echo /scan
+```
+<br/>
+<br/>
+
+### 3️⃣ Install Arduino CLI
+Install Arduino CLI
+```bash
+curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+<br/>
+
+Initialize Arduino CLI and Update Core Package Index
+```bash
+arduino-cli config init
+arduino-cli core update-index
+```
+<br/>
+
+Install Arduino Board Cores
+```bash
+arduino-cli core install arduino:avr
+```
+<br/>
+
+Verify the Arduino Board
+```bash
+arduino-cli board list
 ```
 <br/>

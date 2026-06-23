@@ -56,5 +56,53 @@ Verify the Installation (Talker-Listener Test)
 * First Terminal Tab: `ros2 run demo_nodes_cpp talker`  
 * Second Terminal Tab: `ros2 run demo_nodes_py listener`
 
-Successful communication between the two nodes confirms that the ROS 2 Humble installation is working correctly.
+Successful communication between the two nodes confirms that the ROS 2 Humble installation is working correctly.  
+<br/>
+<br/>
+
+### ⚠️ Attach USB device from Windows to WSL2 using `usbipd`
+Install `usbipd` via PowerShell as Administrator
+```bash
+winget install --id dorssel.usbipd-win --exact
+```
+<br/>
+
+Reopen PowerShell as Administrator and List USB Devices
+```bash
+usbipd list
+```
+<br/>
+
+Identify LiDAR Bus ID and Attach to WSL2 (Keep this terminal open)
+```bash
+usbipd bind --busid 5-1
+usbipd attach --busid 5-1 --wsl --auto-attach
+```
+<br/>
+<br/>
+
+### 2️⃣ Install LiDAR Driver Package
+Install LiDAR Driver Package
+```bash
+sudo apt update
+sudo apt install ros-humble-rplidar-ros -y
+```
+<br/>
+
+Configure LiDAR USB Port Permissions
+```bash
+sudo chmod 666 /dev/ttyUSB0
+```
+<br/>
+
+Run the LiDAR Node
+```bash
+ros2 launch rplidar_ros rplidar_a1_launch.py
+```
+<br/>
+
+Verifying LiDAR Data Reception in new terminal
+```bash
+ros2 topic echo /scan
+```
 <br/>

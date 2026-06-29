@@ -1,4 +1,6 @@
+.vscode/
 __pycache__/
+
 dataset/lane_detection/yolo_*
 result/lane_detection/
 runs/

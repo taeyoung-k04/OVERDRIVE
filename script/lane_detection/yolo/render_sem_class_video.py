@@ -9,7 +9,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from infer_sem_lane_class import make_class_overlay, semantic_to_class_map
+from infer_sem_class import make_class_overlay, semantic_to_class_map
 
 
 def process_batch(model, frames: list[np.ndarray], imgsz: int, device: str) -> list[np.ndarray]:
@@ -95,11 +95,11 @@ def render_video(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=Path("dataset/lane_detection"))
-    parser.add_argument("--output", type=Path, default=Path("result/lane_detection/yolo_sem_lane_class_video"))
+    parser.add_argument("--output", type=Path, default=Path("result/lane_detection/yolo_sem_class_video"))
     parser.add_argument(
         "--weights",
         type=Path,
-        default=Path("runs/semantic/yolo_sem_lane_class/train_cpu_640_yolo26n_ade20k/weights/best.pt"),
+        default=Path("runs/semantic/yolo_lane_sem_class/train_cpu_640_yolo26n_ade20k/weights/best.pt"),
     )
     parser.add_argument("--fps", type=float, default=20.0)
     parser.add_argument("--imgsz", type=int, default=640)

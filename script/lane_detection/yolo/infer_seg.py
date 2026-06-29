@@ -80,7 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weights",
         type=Path,
-        default=Path("runs/segment/runs/yolo_lane_seg/train_cpu_640_yolo26n/weights/best.pt"),
+        default=Path("runs/segment/yolo_lane_seg/train_cpu_640_yolo26n/weights/best.pt"),
     )
     parser.add_argument("--output", type=Path, default=Path("result/lane_detection/yolo_seg"))
     parser.add_argument("--imgsz", type=int, default=960)

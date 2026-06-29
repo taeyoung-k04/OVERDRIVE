@@ -93,9 +93,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weights",
         type=Path,
-        default=Path("runs/semantic/yolo_sem_lane_class/train_cpu_640_yolo26n_ade20k/weights/best.pt"),
+        default=Path("runs/semantic/yolo_lane_sem_class/train_cpu_640_yolo26n_ade20k/weights/best.pt"),
     )
-    parser.add_argument("--output", type=Path, default=Path("result/lane_detection/yolo_sem_lane_class"))
+    parser.add_argument("--output", type=Path, default=Path("result/lane_detection/yolo_sem_class"))
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--device", default="cpu")
     return parser.parse_args()

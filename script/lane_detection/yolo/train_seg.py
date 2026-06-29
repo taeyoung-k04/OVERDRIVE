@@ -15,7 +15,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imgsz", type=int, default=960)
     parser.add_argument("--batch", type=int, default=2)
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--project", type=Path, default=Path("runs/segment/runs/yolo_lane_seg"))
+    parser.add_argument("--project", type=Path, default=Path("runs/segment/yolo_lane_seg"))
     parser.add_argument("--name", default="train_cpu_640_yolo26n")
     return parser.parse_args()
 

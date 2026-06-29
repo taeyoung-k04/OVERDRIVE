@@ -170,7 +170,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, default=Path("dataset/lane_detection/frames"))
     parser.add_argument("--label", type=Path, default=Path("dataset/lane_detection/labels"))
-    parser.add_argument("--output", type=Path, default=Path("dataset/lane_detection/yolo_sem_lane_class"))
+    parser.add_argument("--output", type=Path, default=Path("dataset/lane_detection/yolo_lane_sem_class"))
     parser.add_argument("--val-ratio", type=float, default=0.2)
     parser.add_argument(
         "--ignore-unlabeled",

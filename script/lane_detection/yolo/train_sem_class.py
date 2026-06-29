@@ -9,13 +9,13 @@ from pathlib import Path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data", type=Path, default=Path("dataset/lane_detection/yolo_sem_lane_class/data.yaml"))
+    parser.add_argument("--data", type=Path, default=Path("dataset/lane_detection/yolo_lane_sem_class/data.yaml"))
     parser.add_argument("--model", default="weights/yolo26n-sem-ade20k.pt")
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--batch", type=int, default=2)
     parser.add_argument("--device", default="cpu")
-    parser.add_argument("--project", type=Path, default=Path("yolo_sem_lane_class"))
+    parser.add_argument("--project", type=Path, default=Path("runs/semantic/yolo_lane_sem_class"))
     parser.add_argument("--name", default="train_cpu_640_yolo26n_ade20k")
     return parser.parse_args()
 

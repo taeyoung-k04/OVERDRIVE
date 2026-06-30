@@ -9,6 +9,10 @@
 ### Install Python Packages
 ```bash
 pip install rplidar-roboticia opencv-python pyserial matplotlib
-pip install ultralytics
+pip install python-dotenv ultralytics
 ```
+<br/>
+
+### Configure the `.env` file
+Copy the .env.example file to create .env file and fill in the required variables.
 <br/>

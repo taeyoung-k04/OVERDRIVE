@@ -1,8 +1,13 @@
-import serial
+import os
+from dotenv import load_dotenv
+
 import time
+import serial
 import keyboard
 
-PORT = "COM6"   # Arduino IDE에서 보이는 포트로 바꾸기
+load_dotenv()
+
+PORT = os.getenv("ARDUINO_PORT")
 BAUD = 9600
 
 SEND_INTERVAL = 0.05

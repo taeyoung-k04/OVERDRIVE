@@ -4,17 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
-import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
-
-sys.path.append(str(Path(__file__).resolve().parents[1]))
-
-from label_guided import frame_second, read_mask
-from prepare_seg_dataset import split_frames
 
 
 CLASS_NAMES = (
@@ -42,6 +37,59 @@ LABEL_TO_ID = {
 }
 
 PAINT_LABELS = ("lane_left", "lane_center", "lane_right", "stop_line")
+FRAME_RE = re.compile(r"frame_(\d+)s")
+
+
+def frame_second(path: Path) -> int:
+    match = FRAME_RE.search(path.stem)
+    if not match:
+        raise ValueError(f"Could not parse frame second from {path}")
+    return int(match.group(1))
+
+
+def read_mask(path: Path, shape: tuple[int, int]) -> np.ndarray:
+    mask = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
+    if mask is None:
+        raise RuntimeError(f"Could not read mask: {path}")
+
+    if mask.ndim == 3 and mask.shape[2] == 4:
+        binary = mask[..., 3] > 8
+    elif mask.ndim == 3:
+        binary = np.any(mask[..., :3] > 8, axis=2)
+    else:
+        binary = mask > 8
+
+    result = binary.astype(np.uint8) * 255
+    if result.shape != shape:
+        result = cv2.resize(result, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
+    return result
+
+
+def split_frames(frames: list[tuple[str, int]], val_ratio: float) -> tuple[set[tuple[str, int]], set[tuple[str, int]]]:
+    train: set[tuple[str, int]] = set()
+    val: set[tuple[str, int]] = set()
+
+    by_route: dict[str, list[tuple[str, int]]] = {}
+    for frame in frames:
+        by_route.setdefault(frame[0], []).append(frame)
+
+    for route_frames in by_route.values():
+        route_frames = sorted(route_frames, key=lambda item: item[1])
+        if len(route_frames) == 1:
+            train.add(route_frames[0])
+            continue
+        interval = max(2, round(1.0 / max(val_ratio, 0.01)))
+        for index, frame in enumerate(route_frames):
+            if index % interval == interval - 1:
+                val.add(frame)
+            else:
+                train.add(frame)
+
+    if not val and train:
+        frame = sorted(train)[-1]
+        train.remove(frame)
+        val.add(frame)
+    return train, val
 
 
 def labeled_frames(label_root: Path) -> list[tuple[str, int]]:

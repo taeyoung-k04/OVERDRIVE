@@ -4,15 +4,10 @@
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 
 import cv2
 import numpy as np
-
-sys.path.append(str(Path(__file__).resolve().parents[1]))
-
-from rules import IMAGE_SUFFIXES
 
 
 CLASS_TO_ID = {
@@ -23,6 +18,8 @@ CLASS_TO_ID = {
     "lane_right": 4,
     "stop_line": 5,
 }
+
+IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp"}
 
 MASK_OUTPUTS = {
     "road_mask": CLASS_TO_ID["road"],

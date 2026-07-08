@@ -99,6 +99,7 @@ class LatestFrameReader:
         self.capture = capture
         self.condition = threading.Condition()
         self.frame = None
+        self.frame_time = 0.0
         self.stopped = False
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
@@ -106,12 +107,14 @@ class LatestFrameReader:
     def _run(self) -> None:
         while True:
             ok, frame = self.capture.read()
+            frame_time = time.perf_counter()
             with self.condition:
                 if not ok:
                     self.stopped = True
                     self.condition.notify_all()
                     return
                 self.frame = frame
+                self.frame_time = frame_time
                 self.condition.notify_all()
 
     def read(self):
@@ -121,6 +124,14 @@ class LatestFrameReader:
             if self.frame is None:
                 return False, None
             return True, self.frame.copy()
+
+    def read_with_timestamp(self):
+        with self.condition:
+            if self.frame is None and not self.stopped:
+                self.condition.wait(timeout=2.0)
+            if self.frame is None:
+                return False, None, 0.0
+            return True, self.frame.copy(), self.frame_time
 
     def stop(self) -> None:
         with self.condition:
@@ -199,7 +210,7 @@ def resize_to_height(image, height: int):
 
 
 def join_pre_and_post_perspective(preview, perspective_preview):
-    target_height = max(preview.shape[0], perspective_preview.shape[0])
+    target_height = perspective_preview.shape[0]
     preview = resize_to_height(preview, target_height)
     perspective_preview = resize_to_height(perspective_preview, target_height)
     return np.hstack((preview, perspective_preview))
@@ -214,6 +225,28 @@ def draw_fps(frame, fps: float) -> None:
         0.8,
         (255, 255, 255),
         2,
+        cv2.LINE_AA,
+    )
+
+
+def draw_delay(frame, delay_seconds: float, right_edge: int | None = None) -> None:
+    text = f"Delay: {delay_seconds:.3f}s"
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale = 0.8
+    thickness = 2
+    margin = 12
+    text_size, baseline = cv2.getTextSize(text, font, scale, thickness)
+    right_edge = frame.shape[1] if right_edge is None else min(right_edge, frame.shape[1])
+    x = max(margin, right_edge - text_size[0] - margin)
+    y = margin + text_size[1]
+    cv2.putText(
+        frame,
+        text,
+        (x, y),
+        font,
+        scale,
+        (255, 255, 255),
+        thickness,
         cv2.LINE_AA,
     )
 
@@ -242,7 +275,12 @@ def main() -> None:
 
     try:
         while True:
-            ok, frame = reader.read() if reader is not None else capture.read()
+            delay_right_edge = None
+            if reader is not None:
+                ok, frame, frame_time = reader.read_with_timestamp()
+            else:
+                ok, frame = capture.read()
+                frame_time = time.perf_counter()
             if not ok:
                 raise RuntimeError("Could not read a frame from the camera")
 
@@ -275,6 +313,10 @@ def main() -> None:
                 classmap_canvas = make_classmap_canvas(class_map, frame.dtype)
                 preview = make_preview(classmap_canvas, class_map, args.preview)
                 if pre_perspective_preview is not None:
+                    delay_right_edge = max(
+                        1,
+                        int(round(pre_perspective_preview.shape[1] * preview.shape[0] / pre_perspective_preview.shape[0])),
+                    )
                     preview = join_pre_and_post_perspective(pre_perspective_preview, preview)
 
             now = time.perf_counter()
@@ -284,6 +326,7 @@ def main() -> None:
                 fps = 0.9 * fps + 0.1 * (1.0 / elapsed) if fps else 1.0 / elapsed
             if args.show_fps:
                 draw_fps(preview, fps)
+                draw_delay(preview, now - frame_time, delay_right_edge)
 
             cv2.imshow(window_name, preview)
             key = cv2.waitKey(1) & 0xFF

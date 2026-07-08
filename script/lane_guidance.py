@@ -25,6 +25,7 @@ from lane_detection.infer_sem_class import (
 )
 from lane_detection.realtime_sem_class_camera import (
     LatestFrameReader,
+    draw_delay,
     draw_fps,
     keep_lane_marking_classes,
     make_classmap_canvas,
@@ -368,7 +369,11 @@ def main() -> None:
 
     try:
         while True:
-            ok, frame = reader.read() if reader is not None else capture.read()
+            if reader is not None:
+                ok, frame, frame_time = reader.read_with_timestamp()
+            else:
+                ok, frame = capture.read()
+                frame_time = time.perf_counter()
             if not ok:
                 raise RuntimeError("Could not read a frame from the camera")
 
@@ -405,6 +410,7 @@ def main() -> None:
                 fps = 0.9 * fps + 0.1 * (1.0 / elapsed) if fps else 1.0 / elapsed
             if args.show_fps:
                 draw_fps(preview, fps)
+                draw_delay(preview, now - frame_time)
 
             cv2.imshow(window_name, preview)
             key = cv2.waitKey(1) & 0xFF

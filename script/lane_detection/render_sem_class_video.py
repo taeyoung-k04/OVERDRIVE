@@ -11,13 +11,20 @@ import numpy as np
 
 from infer_sem_class import (
     DEFAULT_WEIGHTS,
+    load_semantic_model,
+    make_class_overlay,
+    semantic_to_class_map,
+)
+from utils.perspective import (
+    add_perspective_args,
+    apply_perspective,
+    make_perspective_config,
+)
+from utils.postprocess import (
     PostprocessConfig,
     add_postprocess_args,
     load_postprocess_config,
-    load_semantic_model,
-    make_class_overlay,
     postprocess_class_map,
-    semantic_to_class_map,
 )
 
 
@@ -27,6 +34,7 @@ def process_batch(
     imgsz: int,
     device: str,
     postprocess_config: PostprocessConfig | None,
+    args: argparse.Namespace,
 ) -> list[np.ndarray]:
     results = model.predict(
         source=frames,
@@ -38,9 +46,12 @@ def process_batch(
 
     overlays: list[np.ndarray] = []
     for frame, result in zip(frames, results):
+        perspective_config = make_perspective_config(args, frame.shape[:2])
         class_map = semantic_to_class_map(result.semantic_mask, frame.shape[:2])
         if postprocess_config is not None:
             class_map = postprocess_class_map(class_map, postprocess_config)
+        frame = apply_perspective(frame, perspective_config)
+        class_map = apply_perspective(class_map, perspective_config, cv2.INTER_NEAREST)
         overlays.append(make_class_overlay(frame, class_map))
     return overlays
 
@@ -54,6 +65,7 @@ def render_video(
     device: str,
     batch_size: int,
     postprocess_config: PostprocessConfig | None,
+    args: argparse.Namespace,
 ) -> None:
     capture = cv2.VideoCapture(str(source))
     if not capture.isOpened():
@@ -63,6 +75,9 @@ def render_video(
     total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
     width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    perspective_config = make_perspective_config(args, (height, width))
+    if perspective_config is not None:
+        width, height = perspective_config.output_size
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
@@ -94,14 +109,14 @@ def render_video(
         batch.append(frame)
         next_time += frame_step_time
         if len(batch) >= batch_size:
-            for overlay in process_batch(model, batch, imgsz, device, postprocess_config):
+            for overlay in process_batch(model, batch, imgsz, device, postprocess_config, args):
                 writer.write(overlay)
                 written += 1
             batch.clear()
             print(f"{source.name}: read {frame_index}/{total_frames}, wrote {written}", flush=True)
 
     if batch:
-        for overlay in process_batch(model, batch, imgsz, device, postprocess_config):
+        for overlay in process_batch(model, batch, imgsz, device, postprocess_config, args):
             writer.write(overlay)
             written += 1
 
@@ -125,6 +140,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--batch", type=int, default=4)
     parser.add_argument("--device", default="cpu")
+    add_perspective_args(parser)
     add_postprocess_args(parser)
     return parser.parse_args()
 
@@ -148,6 +164,7 @@ def main() -> None:
             args.device,
             args.batch,
             postprocess_config,
+            args,
         )
 
 

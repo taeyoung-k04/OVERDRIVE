@@ -13,15 +13,22 @@ import cv2
 import numpy as np
 
 from infer_sem_class import (
-    CLASS_TO_ID,
     DEFAULT_WEIGHTS,
     OVERLAY_COLORS,
-    add_postprocess_args,
-    load_postprocess_config,
     load_semantic_model,
     make_class_overlay,
-    postprocess_class_map,
     semantic_to_class_map,
+)
+from utils.perspective import (
+    add_perspective_args,
+    apply_perspective,
+    make_perspective_config,
+)
+from utils.postprocess import (
+    CLASS_TO_ID,
+    add_postprocess_args,
+    load_postprocess_config,
+    postprocess_class_map,
 )
 
 
@@ -58,6 +65,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--flip", action="store_true", help="Horizontally flip camera frames before inference.")
     parser.add_argument("--show-fps", action="store_true", help="Draw measured FPS on the overlay.")
+    parser.add_argument(
+        "--show-pre-perspective",
+        action="store_true",
+        help="With --perspective, also display the preview before perspective warp.",
+    )
+    add_perspective_args(parser)
     add_postprocess_args(parser)
     return parser.parse_args()
 
@@ -159,6 +172,39 @@ def make_line_preview(image, class_map):
     return preview
 
 
+def keep_lane_marking_classes(class_map):
+    kept_ids = [
+        CLASS_TO_ID[class_name]
+        for class_name in ("lane_left", "lane_center", "lane_right", "stop_line")
+    ]
+    return np.where(np.isin(class_map, kept_ids), class_map, CLASS_TO_ID["background"]).astype(class_map.dtype)
+
+
+def make_preview(image, class_map, mode: str):
+    if mode == "overlay":
+        return make_class_overlay(image, class_map)
+    return make_line_preview(image, class_map)
+
+
+def make_classmap_canvas(class_map, dtype):
+    height, width = class_map.shape[:2]
+    return np.zeros((height, width, 3), dtype=dtype)
+
+
+def resize_to_height(image, height: int):
+    if image.shape[0] == height:
+        return image
+    width = max(1, int(round(image.shape[1] * height / image.shape[0])))
+    return cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+
+
+def join_pre_and_post_perspective(preview, perspective_preview):
+    target_height = max(preview.shape[0], perspective_preview.shape[0])
+    preview = resize_to_height(preview, target_height)
+    perspective_preview = resize_to_height(perspective_preview, target_height)
+    return np.hstack((preview, perspective_preview))
+
+
 def draw_fps(frame, fps: float) -> None:
     cv2.putText(
         frame,
@@ -203,6 +249,7 @@ def main() -> None:
             if args.flip:
                 frame = cv2.flip(frame, 1)
             frame = normalize_frame_size(frame, args.width, args.height, not args.no_force_size)
+            perspective_config = make_perspective_config(args, frame.shape[:2])
 
             results = model.predict(
                 source=frame,
@@ -210,14 +257,25 @@ def main() -> None:
                 device=args.device,
                 task="semantic",
                 verbose=False,
+                stream=True,
             )
-            class_map = semantic_to_class_map(results[0].semantic_mask, frame.shape[:2])
+            result = next(iter(results))
+            class_map = semantic_to_class_map(result.semantic_mask, frame.shape[:2])
             if postprocess_config is not None:
                 class_map = postprocess_class_map(class_map, postprocess_config)
-            if args.preview == "overlay":
-                preview = make_class_overlay(frame, class_map)
+
+            if perspective_config is None:
+                preview = make_preview(frame, class_map, args.preview)
             else:
-                preview = make_line_preview(frame, class_map)
+                pre_perspective_preview = (
+                    make_preview(frame, class_map, args.preview) if args.show_pre_perspective else None
+                )
+                class_map = keep_lane_marking_classes(class_map)
+                class_map = apply_perspective(class_map, perspective_config, cv2.INTER_NEAREST)
+                classmap_canvas = make_classmap_canvas(class_map, frame.dtype)
+                preview = make_preview(classmap_canvas, class_map, args.preview)
+                if pre_perspective_preview is not None:
+                    preview = join_pre_and_post_perspective(pre_perspective_preview, preview)
 
             now = time.perf_counter()
             elapsed = now - previous_time

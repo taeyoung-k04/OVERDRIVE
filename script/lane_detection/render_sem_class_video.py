@@ -9,7 +9,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from infer_sem_class import make_class_overlay, semantic_to_class_map
+from infer_sem_class import DEFAULT_WEIGHTS, load_semantic_model, make_class_overlay, semantic_to_class_map
 
 
 def process_batch(model, frames: list[np.ndarray], imgsz: int, device: str) -> list[np.ndarray]:
@@ -99,9 +99,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weights",
         type=Path,
-        default=Path("runs/semantic/yolo_lane_sem_class/train_cpu_640_yolo26n_ade20k/weights/best.pt"),
+        default=DEFAULT_WEIGHTS,
+        help="Path to .pt or .onnx weights. With --backend onnx, a .pt suffix is replaced with .onnx.",
     )
-    parser.add_argument("--fps", type=float, default=20.0)
+    parser.add_argument("--backend", choices=("auto", "pt", "onnx"), default="auto")
+    parser.add_argument("--fps", type=float, default=15.0)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--batch", type=int, default=4)
     parser.add_argument("--device", default="cpu")
@@ -110,15 +112,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    try:
-        from ultralytics import YOLO
-    except ImportError as exc:
-        raise SystemExit(
-            "ultralytics is not installed in the active environment. "
-            "Install it in the overdrive conda env before rendering videos."
-        ) from exc
 
-    model = YOLO(str(args.weights), task="semantic")
+    model = load_semantic_model(args.weights, args.backend)
     sources = sorted(args.input.glob("*.mp4"))
     if not sources:
         raise SystemExit(f"No mp4 files found in {args.input}")

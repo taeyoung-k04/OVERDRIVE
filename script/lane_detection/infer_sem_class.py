@@ -18,6 +18,7 @@ CLASS_TO_ID = {
     "lane_right": 4,
     "stop_line": 5,
 }
+DEFAULT_WEIGHTS = Path("runs/semantic/yolo_lane_sem_class/train_cpu_640_yolo26n_ade20k/weights/best.pt")
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp"}
 
@@ -36,6 +37,40 @@ OVERLAY_COLORS = {
     CLASS_TO_ID["lane_right"]: (80, 255, 80),
     CLASS_TO_ID["stop_line"]: (0, 0, 255),
 }
+OVERLAY_ALPHA = 0.32
+OVERLAY_CLASS_NAMES = ("road", "lane_left", "lane_center", "lane_right", "stop_line")
+
+
+def resolve_model_path(weights: Path, backend: str) -> Path:
+    if backend == "auto":
+        model_path = weights
+    elif backend == "pt":
+        model_path = weights.with_suffix(".pt") if weights.suffix.lower() != ".pt" else weights
+    elif backend == "onnx":
+        model_path = weights.with_suffix(".onnx") if weights.suffix.lower() != ".onnx" else weights
+    else:
+        raise ValueError(f"Unsupported backend: {backend}")
+
+    if not model_path.exists():
+        raise SystemExit(
+            f"Model file does not exist: {model_path}\n"
+            "Use --weights to point to an existing .pt/.onnx file, or export ONNX first."
+        )
+    return model_path
+
+
+def load_semantic_model(weights: Path, backend: str):
+    try:
+        from ultralytics import YOLO
+    except ImportError as exc:
+        raise SystemExit(
+            "ultralytics is not installed in the active environment. "
+            "Install it in the overdrive conda env before inference."
+        ) from exc
+
+    model_path = resolve_model_path(weights, backend)
+    print(f"Using {model_path.suffix.lower()[1:]} model: {model_path}")
+    return YOLO(str(model_path), task="semantic")
 
 
 def semantic_to_class_map(semantic, shape: tuple[int, int]) -> np.ndarray:
@@ -50,17 +85,22 @@ def semantic_to_class_map(semantic, shape: tuple[int, int]) -> np.ndarray:
 
 def make_class_overlay(image: np.ndarray, class_map: np.ndarray) -> np.ndarray:
     overlay = image.copy()
-    tint = np.zeros_like(image)
-    road_id = CLASS_TO_ID["road"]
-    tint[class_map == road_id] = OVERLAY_COLORS[road_id]
-    overlay = cv2.addWeighted(overlay, 1.0, tint, 0.24, 0)
-
-    for class_name in ("lane_left", "lane_center", "lane_right", "stop_line"):
+    for class_name in OVERLAY_CLASS_NAMES:
         class_id = CLASS_TO_ID[class_name]
         mask = (class_map == class_id).astype(np.uint8) * 255
+        if not np.any(mask):
+            continue
+
+        color = np.array(OVERLAY_COLORS[class_id], dtype=np.float32)
+        mask_bool = mask > 0
+        overlay[mask_bool] = (
+            image[mask_bool].astype(np.float32) * (1.0 - OVERLAY_ALPHA)
+            + color * OVERLAY_ALPHA
+        ).astype(np.uint8)
+
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(overlay, contours, -1, OVERLAY_COLORS[class_id], 5, cv2.LINE_AA)
-        overlay[mask > 0] = OVERLAY_COLORS[class_id]
+        thickness = 2 if class_name == "road" else 4
+        cv2.drawContours(overlay, contours, -1, OVERLAY_COLORS[class_id], thickness, cv2.LINE_AA)
     return overlay
 
 
@@ -90,8 +130,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weights",
         type=Path,
-        default=Path("runs/semantic/yolo_lane_sem_class/train_cpu_640_yolo26n_ade20k/weights/best.pt"),
+        default=DEFAULT_WEIGHTS,
+        help="Path to .pt or .onnx weights. With --backend onnx, a .pt suffix is replaced with .onnx.",
     )
+    parser.add_argument("--backend", choices=("auto", "pt", "onnx"), default="auto")
     parser.add_argument("--output", type=Path, default=Path("result/lane_detection/yolo_sem_class"))
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--device", default="cpu")
@@ -100,15 +142,8 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    try:
-        from ultralytics import YOLO
-    except ImportError as exc:
-        raise SystemExit(
-            "ultralytics is not installed in the active environment. "
-            "Install it in the overdrive conda env before inference."
-        ) from exc
 
-    model = YOLO(str(args.weights), task="semantic")
+    model = load_semantic_model(args.weights, args.backend)
     sources = sorted(
         path for path in args.input.rglob("*")
         if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES

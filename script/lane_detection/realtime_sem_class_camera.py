@@ -12,7 +12,14 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from infer_sem_class import CLASS_TO_ID, OVERLAY_COLORS, make_class_overlay, semantic_to_class_map
+from infer_sem_class import (
+    CLASS_TO_ID,
+    DEFAULT_WEIGHTS,
+    OVERLAY_COLORS,
+    load_semantic_model,
+    make_class_overlay,
+    semantic_to_class_map,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -20,9 +27,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--weights",
         type=Path,
-        default=Path("runs/semantic/yolo_lane_sem_class/train_cpu_640_yolo26n_ade20k/weights/best.pt"),
-        help="Path to the trained semantic-class YOLO weights.",
+        default=DEFAULT_WEIGHTS,
+        help="Path to .pt or .onnx weights. With --backend onnx, a .pt suffix is replaced with .onnx.",
     )
+    parser.add_argument("--backend", choices=("auto", "pt", "onnx"), default="auto")
     parser.add_argument("--camera", type=int, default=0, help="OpenCV camera index.")
     parser.add_argument("--imgsz", type=int, default=640, help="YOLO inference image size.")
     parser.add_argument("--device", default="cpu", help="Inference device, e.g. cpu, 0, cuda:0.")
@@ -41,9 +49,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--preview",
-        choices=("overlay", "fast", "lines", "raw", "camera"),
+        choices=("overlay", "lines"),
         default="lines",
-        help="Display mode. camera skips inference, raw runs inference but shows the original frame.",
+        help="Display mode.",
     )
     parser.add_argument("--flip", action="store_true", help="Horizontally flip camera frames before inference.")
     parser.add_argument("--show-fps", action="store_true", help="Draw measured FPS on the overlay.")
@@ -112,17 +120,6 @@ def normalize_frame_size(frame, width: int, height: int, force_size: bool):
     return cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
 
 
-def make_fast_preview(image, class_map):
-    preview = image.copy()
-    road = class_map == 1
-    road_color = np.array((35, 20, 0), dtype=np.float32)
-    preview[road] = (preview[road].astype(np.float32) * 0.76 + road_color * 0.24).astype(np.uint8)
-    for class_name in ("lane_left", "lane_center", "lane_right", "stop_line"):
-        class_id = CLASS_TO_ID[class_name]
-        preview[class_map == class_id] = OVERLAY_COLORS[class_id]
-    return preview
-
-
 def draw_fitted_line(preview, points, color, thickness: int) -> None:
     if points is None or len(points) < 24:
         return
@@ -149,7 +146,7 @@ def draw_fitted_line(preview, points, color, thickness: int) -> None:
 
 
 def make_line_preview(image, class_map):
-    preview = image.copy()
+    preview = make_class_overlay(image, class_map)
     for class_name in ("lane_left", "lane_center", "lane_right", "stop_line"):
         class_id = CLASS_TO_ID[class_name]
         points = cv2.findNonZero((class_map == class_id).astype(np.uint8))
@@ -173,19 +170,7 @@ def draw_fps(frame, fps: float) -> None:
 
 def main() -> None:
     args = parse_args()
-    model = None
-    if args.preview != "camera":
-        try:
-            from ultralytics import YOLO
-        except ImportError as exc:
-            raise SystemExit(
-                "ultralytics is not installed in the active environment. "
-                "Install it before running real-time lane inference."
-            ) from exc
-
-        if not args.weights.exists():
-            raise SystemExit(f"Weights file does not exist: {args.weights}")
-        model = YOLO(str(args.weights), task="semantic")
+    model = load_semantic_model(args.weights, args.backend)
 
     capture = open_camera(args.camera, args.width, args.height, args.camera_fps)
     reader = None if args.buffered_camera else LatestFrameReader(capture)
@@ -214,25 +199,18 @@ def main() -> None:
                 frame = cv2.flip(frame, 1)
             frame = normalize_frame_size(frame, args.width, args.height, not args.no_force_size)
 
-            if args.preview == "camera":
-                preview = frame
+            results = model.predict(
+                source=frame,
+                imgsz=args.imgsz,
+                device=args.device,
+                task="semantic",
+                verbose=False,
+            )
+            class_map = semantic_to_class_map(results[0].semantic_mask, frame.shape[:2])
+            if args.preview == "overlay":
+                preview = make_class_overlay(frame, class_map)
             else:
-                results = model.predict(
-                    source=frame,
-                    imgsz=args.imgsz,
-                    device=args.device,
-                    task="semantic",
-                    verbose=False,
-                )
-                class_map = semantic_to_class_map(results[0].semantic_mask, frame.shape[:2])
-                if args.preview == "overlay":
-                    preview = make_class_overlay(frame, class_map)
-                elif args.preview == "fast":
-                    preview = make_fast_preview(frame, class_map)
-                elif args.preview == "lines":
-                    preview = make_line_preview(frame, class_map)
-                else:
-                    preview = frame
+                preview = make_line_preview(frame, class_map)
 
             now = time.perf_counter()
             elapsed = now - previous_time

@@ -3,7 +3,5 @@
 __pycache__/
 
 dataset/lane_detection/yolo_*
-dataset/lane_detection_with_crosswalk/yolo_*
 result/lane_detection/
-runs/
-weights/
+weights/*.pt

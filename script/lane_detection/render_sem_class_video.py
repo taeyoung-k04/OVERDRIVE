@@ -9,10 +9,25 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from infer_sem_class import DEFAULT_WEIGHTS, load_semantic_model, make_class_overlay, semantic_to_class_map
+from infer_sem_class import (
+    DEFAULT_WEIGHTS,
+    PostprocessConfig,
+    add_postprocess_args,
+    load_postprocess_config,
+    load_semantic_model,
+    make_class_overlay,
+    postprocess_class_map,
+    semantic_to_class_map,
+)
 
 
-def process_batch(model, frames: list[np.ndarray], imgsz: int, device: str) -> list[np.ndarray]:
+def process_batch(
+    model,
+    frames: list[np.ndarray],
+    imgsz: int,
+    device: str,
+    postprocess_config: PostprocessConfig | None,
+) -> list[np.ndarray]:
     results = model.predict(
         source=frames,
         imgsz=imgsz,
@@ -24,6 +39,8 @@ def process_batch(model, frames: list[np.ndarray], imgsz: int, device: str) -> l
     overlays: list[np.ndarray] = []
     for frame, result in zip(frames, results):
         class_map = semantic_to_class_map(result.semantic_mask, frame.shape[:2])
+        if postprocess_config is not None:
+            class_map = postprocess_class_map(class_map, postprocess_config)
         overlays.append(make_class_overlay(frame, class_map))
     return overlays
 
@@ -36,6 +53,7 @@ def render_video(
     imgsz: int,
     device: str,
     batch_size: int,
+    postprocess_config: PostprocessConfig | None,
 ) -> None:
     capture = cv2.VideoCapture(str(source))
     if not capture.isOpened():
@@ -76,14 +94,14 @@ def render_video(
         batch.append(frame)
         next_time += frame_step_time
         if len(batch) >= batch_size:
-            for overlay in process_batch(model, batch, imgsz, device):
+            for overlay in process_batch(model, batch, imgsz, device, postprocess_config):
                 writer.write(overlay)
                 written += 1
             batch.clear()
             print(f"{source.name}: read {frame_index}/{total_frames}, wrote {written}", flush=True)
 
     if batch:
-        for overlay in process_batch(model, batch, imgsz, device):
+        for overlay in process_batch(model, batch, imgsz, device, postprocess_config):
             writer.write(overlay)
             written += 1
 
@@ -107,6 +125,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--batch", type=int, default=4)
     parser.add_argument("--device", default="cpu")
+    add_postprocess_args(parser)
     return parser.parse_args()
 
 
@@ -114,12 +133,22 @@ def main() -> None:
     args = parse_args()
 
     model = load_semantic_model(args.weights, args.backend)
+    postprocess_config = load_postprocess_config(args.postprocess_config) if args.postprocess else None
     sources = sorted(args.input.glob("*.mp4"))
     if not sources:
         raise SystemExit(f"No mp4 files found in {args.input}")
 
     for source in sources:
-        render_video(model, source, args.output / source.name, args.fps, args.imgsz, args.device, args.batch)
+        render_video(
+            model,
+            source,
+            args.output / source.name,
+            args.fps,
+            args.imgsz,
+            args.device,
+            args.batch,
+            postprocess_config,
+        )
 
 
 if __name__ == "__main__":

@@ -16,8 +16,11 @@ from infer_sem_class import (
     CLASS_TO_ID,
     DEFAULT_WEIGHTS,
     OVERLAY_COLORS,
+    add_postprocess_args,
+    load_postprocess_config,
     load_semantic_model,
     make_class_overlay,
+    postprocess_class_map,
     semantic_to_class_map,
 )
 
@@ -36,7 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu", help="Inference device, e.g. cpu, 0, cuda:0.")
     parser.add_argument("--width", type=int, default=960, help="Camera/frame width. 0 keeps camera default.")
     parser.add_argument("--height", type=int, default=540, help="Camera/frame height. 0 keeps camera default.")
-    parser.add_argument("--camera-fps", type=int, default=30, help="Requested camera FPS. 0 keeps camera default.")
+    parser.add_argument("--camera-fps", type=int, default=20, help="Requested camera FPS. 0 keeps camera default.")
     parser.add_argument(
         "--no-force-size",
         action="store_true",
@@ -50,11 +53,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--preview",
         choices=("overlay", "lines"),
-        default="lines",
+        default="overlay",
         help="Display mode.",
     )
     parser.add_argument("--flip", action="store_true", help="Horizontally flip camera frames before inference.")
     parser.add_argument("--show-fps", action="store_true", help="Draw measured FPS on the overlay.")
+    add_postprocess_args(parser)
     return parser.parse_args()
 
 
@@ -171,6 +175,7 @@ def draw_fps(frame, fps: float) -> None:
 def main() -> None:
     args = parse_args()
     model = load_semantic_model(args.weights, args.backend)
+    postprocess_config = load_postprocess_config(args.postprocess_config) if args.postprocess else None
 
     capture = open_camera(args.camera, args.width, args.height, args.camera_fps)
     reader = None if args.buffered_camera else LatestFrameReader(capture)
@@ -207,6 +212,8 @@ def main() -> None:
                 verbose=False,
             )
             class_map = semantic_to_class_map(results[0].semantic_mask, frame.shape[:2])
+            if postprocess_config is not None:
+                class_map = postprocess_class_map(class_map, postprocess_config)
             if args.preview == "overlay":
                 preview = make_class_overlay(frame, class_map)
             else:

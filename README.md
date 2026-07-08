@@ -30,8 +30,7 @@ python -c "from ultralytics import YOLO; YOLO('runs/semantic/yolo_lane_sem_class
 
 ### 🔸 Run Inference with the Semantic Segmentation Model
 ```bash
-python .\script\lane_detection\infer_sem_class.py --backend onnx
-python .\script\lane_detection\render_sem_class_video.py --backend onnx
-python .\script\lane_detection\realtime_sem_class_camera.py --backend onnx --camera 1 --show-fps
+python .\script\lane_detection\infer_sem_class.py --backend onnx --postprocess
+python .\script\lane_detection\render_sem_class_video.py --backend onnx --postprocess
+python .\script\lane_detection\realtime_sem_class_camera.py --backend onnx --postprocess --camera 1 --show-fps
 ```
-<br/>

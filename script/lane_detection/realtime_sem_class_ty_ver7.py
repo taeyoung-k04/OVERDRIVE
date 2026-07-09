@@ -1,14 +1,4 @@
 #!/usr/bin/env python3
-""".\.venv\Scripts\Activate.ps1"""
-
-"""python .\script\lane_detection\realtime_sem_class_ty_ver7.py `
->>   --weights .\runs\semantic\yolo_lane_sem_class\train_cpu_640_yolo26n_ade20k\weights\best.onnx `
->>   --camera 1 `
->>   --lane-follow `
->>   --lane-follow-right `
->>   --show-fps
->>   --arduino-port COM6"""
-
 """Low-latency yellow+green right-lane following with keyboard arming.
 
 Runtime behavior:
@@ -37,6 +27,18 @@ Latency improvements:
 """
 
 from __future__ import annotations
+
+# 가상환경 활성화:
+# .\.venv\Scripts\Activate.ps1
+#
+# 실행 명령:
+# python .\script\lane_detection\realtime_sem_class_ty_ver7.py `
+#   --weights .\runs\semantic\yolo_lane_sem_class\train_cpu_640_yolo26n_ade20k\weights\best.onnx `
+#   --camera 1 `
+#   --lane-follow `
+#   --lane-follow-right `
+#   --show-fps `
+#   --arduino-port COM6
 
 import argparse
 import sys

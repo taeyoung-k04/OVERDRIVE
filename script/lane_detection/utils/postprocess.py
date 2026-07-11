@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import os
-from dataclasses import dataclass
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -18,60 +15,12 @@ CLASS_TO_ID = {
     "stop_line": 5,
 }
 
-DEFAULT_POSTPROCESS_CONFIG = Path(".env")
 DEFAULT_ROAD_GAP_PX = 48.0
 DEFAULT_LANE_GAP_PX = 16.0
 DEFAULT_STOP_LINE_MIN_AREA_PX = 1024.0
 DEFAULT_POSTPROCESS_REFERENCE_WIDTH = 960.0
 DEFAULT_POSTPROCESS_REFERENCE_HEIGHT = 540.0
 POSTPROCESS_TOP_REMOVE_RATIO = 0.25
-
-
-@dataclass(frozen=True)
-class PostprocessConfig:
-    road_gap_px: float
-    lane_gap_px: float
-    stop_line_min_area_px: float
-
-
-def _read_key_value_file(path: Path) -> dict[str, str]:
-    if not path.exists():
-        return {}
-
-    values: dict[str, str] = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-
-        key, value = line.split("=", 1)
-        value = value.split("#", 1)[0].strip()
-        values[key.strip()] = value.strip("\"'")
-    return values
-
-
-def _get_float_config(values: dict[str, str], key: str, default: float) -> float:
-    raw_value = values.get(key, os.getenv(key))
-    if raw_value in (None, ""):
-        return default
-
-    try:
-        return float(raw_value)
-    except ValueError as exc:
-        raise SystemExit(f"{key} must be a number, got: {raw_value}") from exc
-
-
-def load_postprocess_config(path: Path) -> PostprocessConfig:
-    values = _read_key_value_file(path)
-    return PostprocessConfig(
-        road_gap_px=_get_float_config(values, "LANE_POSTPROCESS_ROAD_GAP_PX", DEFAULT_ROAD_GAP_PX),
-        lane_gap_px=_get_float_config(values, "LANE_POSTPROCESS_LANE_GAP_PX", DEFAULT_LANE_GAP_PX),
-        stop_line_min_area_px=_get_float_config(
-            values,
-            "LANE_POSTPROCESS_STOP_LINE_MIN_AREA_PX",
-            DEFAULT_STOP_LINE_MIN_AREA_PX,
-        ),
-    )
 
 
 def _distance_to_mask(mask: np.ndarray) -> np.ndarray:
@@ -146,15 +95,15 @@ def _remove_small_components(mask: np.ndarray, min_area_px: float) -> np.ndarray
     return remove
 
 
-def postprocess_class_map(class_map: np.ndarray, config: PostprocessConfig) -> np.ndarray:
+def postprocess_class_map(class_map: np.ndarray) -> np.ndarray:
     processed = class_map.copy()
     top_cutoff = int(round(processed.shape[0] * POSTPROCESS_TOP_REMOVE_RATIO))
     if top_cutoff > 0:
         processed[:top_cutoff, :] = CLASS_TO_ID["background"]
 
-    road_gap_px = _distance_threshold_px(class_map.shape, config.road_gap_px)
-    lane_gap_px = _distance_threshold_px(class_map.shape, config.lane_gap_px)
-    stop_line_min_area_px = _area_threshold_px(class_map.shape, config.stop_line_min_area_px)
+    road_gap_px = _distance_threshold_px(class_map.shape, DEFAULT_ROAD_GAP_PX)
+    lane_gap_px = _distance_threshold_px(class_map.shape, DEFAULT_LANE_GAP_PX)
+    stop_line_min_area_px = _area_threshold_px(class_map.shape, DEFAULT_STOP_LINE_MIN_AREA_PX)
     road_id = CLASS_TO_ID["road"]
     road_mask = processed == road_id
     main_road = _main_road_mask(road_mask)
@@ -206,10 +155,3 @@ def postprocess_class_map(class_map: np.ndarray, config: PostprocessConfig) -> n
 
 def add_postprocess_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--postprocess", action="store_true", help="Apply road/lane semantic postprocessing.")
-    parser.add_argument(
-        "--postprocess-config",
-        type=Path,
-        default=DEFAULT_POSTPROCESS_CONFIG,
-        help="Path to an env-style postprocess config file.",
-    )
-

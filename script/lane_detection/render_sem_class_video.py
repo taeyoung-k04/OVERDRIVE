@@ -21,9 +21,7 @@ from utils.perspective import (
     make_perspective_config,
 )
 from utils.postprocess import (
-    PostprocessConfig,
     add_postprocess_args,
-    load_postprocess_config,
     postprocess_class_map,
 )
 
@@ -33,7 +31,7 @@ def process_batch(
     frames: list[np.ndarray],
     imgsz: int,
     device: str,
-    postprocess_config: PostprocessConfig | None,
+    postprocess: bool,
     args: argparse.Namespace,
 ) -> list[np.ndarray]:
     results = model.predict(
@@ -48,8 +46,8 @@ def process_batch(
     for frame, result in zip(frames, results):
         perspective_config = make_perspective_config(args, frame.shape[:2])
         class_map = semantic_to_class_map(result.semantic_mask, frame.shape[:2])
-        if postprocess_config is not None:
-            class_map = postprocess_class_map(class_map, postprocess_config)
+        if postprocess:
+            class_map = postprocess_class_map(class_map)
         frame = apply_perspective(frame, perspective_config)
         class_map = apply_perspective(class_map, perspective_config, cv2.INTER_NEAREST)
         overlays.append(make_class_overlay(frame, class_map))
@@ -64,7 +62,7 @@ def render_video(
     imgsz: int,
     device: str,
     batch_size: int,
-    postprocess_config: PostprocessConfig | None,
+    postprocess: bool,
     args: argparse.Namespace,
 ) -> None:
     capture = cv2.VideoCapture(str(source))
@@ -109,14 +107,14 @@ def render_video(
         batch.append(frame)
         next_time += frame_step_time
         if len(batch) >= batch_size:
-            for overlay in process_batch(model, batch, imgsz, device, postprocess_config, args):
+            for overlay in process_batch(model, batch, imgsz, device, postprocess, args):
                 writer.write(overlay)
                 written += 1
             batch.clear()
             print(f"{source.name}: read {frame_index}/{total_frames}, wrote {written}", flush=True)
 
     if batch:
-        for overlay in process_batch(model, batch, imgsz, device, postprocess_config, args):
+        for overlay in process_batch(model, batch, imgsz, device, postprocess, args):
             writer.write(overlay)
             written += 1
 
@@ -149,7 +147,6 @@ def main() -> None:
     args = parse_args()
 
     model = load_semantic_model(args.weights, args.backend)
-    postprocess_config = load_postprocess_config(args.postprocess_config) if args.postprocess else None
     sources = sorted(args.input.glob("*.mp4"))
     if not sources:
         raise SystemExit(f"No mp4 files found in {args.input}")
@@ -163,7 +160,7 @@ def main() -> None:
             args.imgsz,
             args.device,
             args.batch,
-            postprocess_config,
+            args.postprocess,
             args,
         )
 

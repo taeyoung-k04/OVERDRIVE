@@ -17,7 +17,6 @@ from utils.perspective import (
 from utils.postprocess import (
     CLASS_TO_ID,
     add_postprocess_args,
-    load_postprocess_config,
     postprocess_class_map,
 )
 
@@ -151,7 +150,6 @@ def main() -> None:
     args = parse_args()
 
     model = load_semantic_model(args.weights, args.backend)
-    postprocess_config = load_postprocess_config(args.postprocess_config) if args.postprocess else None
     sources = sorted(
         path for path in args.input.rglob("*")
         if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES
@@ -172,8 +170,8 @@ def main() -> None:
             verbose=False,
         )
         class_map = semantic_to_class_map(results[0].semantic_mask, image.shape[:2])
-        if postprocess_config is not None:
-            class_map = postprocess_class_map(class_map, postprocess_config)
+        if args.postprocess:
+            class_map = postprocess_class_map(class_map)
         image = apply_perspective(image, perspective_config)
         class_map = apply_perspective(class_map, perspective_config, cv2.INTER_NEAREST)
         save_prediction(source, args.input, args.output, class_map, image)

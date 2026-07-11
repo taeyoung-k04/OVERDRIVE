@@ -27,7 +27,6 @@ from utils.perspective import (
 from utils.postprocess import (
     CLASS_TO_ID,
     add_postprocess_args,
-    load_postprocess_config,
     postprocess_class_map,
 )
 
@@ -254,7 +253,6 @@ def draw_delay(frame, delay_seconds: float, right_edge: int | None = None) -> No
 def main() -> None:
     args = parse_args()
     model = load_semantic_model(args.weights, args.backend)
-    postprocess_config = load_postprocess_config(args.postprocess_config) if args.postprocess else None
 
     capture = open_camera(args.camera, args.width, args.height, args.camera_fps)
     reader = None if args.buffered_camera else LatestFrameReader(capture)
@@ -299,8 +297,8 @@ def main() -> None:
             )
             result = next(iter(results))
             class_map = semantic_to_class_map(result.semantic_mask, frame.shape[:2])
-            if postprocess_config is not None:
-                class_map = postprocess_class_map(class_map, postprocess_config)
+            if args.postprocess:
+                class_map = postprocess_class_map(class_map)
 
             if perspective_config is None:
                 preview = make_preview(frame, class_map, args.preview)

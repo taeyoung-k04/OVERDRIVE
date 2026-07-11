@@ -14,7 +14,6 @@ import numpy as np
 
 from infer_sem_class import (
     DEFAULT_WEIGHTS,
-    OVERLAY_COLORS,
     load_semantic_model,
     make_class_overlay,
     semantic_to_class_map,
@@ -55,12 +54,6 @@ def parse_args() -> argparse.Namespace:
         "--buffered-camera",
         action="store_true",
         help="Use normal blocking camera reads instead of the low-latency latest-frame reader.",
-    )
-    parser.add_argument(
-        "--preview",
-        choices=("overlay", "lines"),
-        default="overlay",
-        help="Display mode.",
     )
     parser.add_argument("--flip", action="store_true", help="Horizontally flip camera frames before inference.")
     parser.add_argument("--show-fps", action="store_true", help="Draw measured FPS on the overlay.")
@@ -147,53 +140,12 @@ def normalize_frame_size(frame, width: int, height: int, force_size: bool):
     return cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
 
 
-def draw_fitted_line(preview, points, color, thickness: int) -> None:
-    if points is None or len(points) < 24:
-        return
-
-    vx, vy, x0, y0 = cv2.fitLine(points, cv2.DIST_L2, 0, 0.01, 0.01).flatten()
-    xs = points[:, 0, 0]
-    ys = points[:, 0, 1]
-    height, width = preview.shape[:2]
-
-    if abs(vy) > 1e-4:
-        y1 = int(np.clip(ys.min(), 0, height - 1))
-        y2 = int(np.clip(ys.max(), 0, height - 1))
-        x1 = int(np.clip(x0 + (y1 - y0) * vx / vy, 0, width - 1))
-        x2 = int(np.clip(x0 + (y2 - y0) * vx / vy, 0, width - 1))
-    elif abs(vx) > 1e-4:
-        x1 = int(np.clip(xs.min(), 0, width - 1))
-        x2 = int(np.clip(xs.max(), 0, width - 1))
-        y1 = int(np.clip(y0 + (x1 - x0) * vy / vx, 0, height - 1))
-        y2 = int(np.clip(y0 + (x2 - x0) * vy / vx, 0, height - 1))
-    else:
-        return
-
-    cv2.line(preview, (x1, y1), (x2, y2), color, thickness, cv2.LINE_AA)
-
-
-def make_line_preview(image, class_map):
-    preview = make_class_overlay(image, class_map)
-    for class_name in ("lane_left", "lane_center", "lane_right", "stop_line"):
-        class_id = CLASS_TO_ID[class_name]
-        points = cv2.findNonZero((class_map == class_id).astype(np.uint8))
-        thickness = 5 if class_name == "stop_line" else 7
-        draw_fitted_line(preview, points, OVERLAY_COLORS[class_id], thickness)
-    return preview
-
-
 def keep_lane_marking_classes(class_map):
     kept_ids = [
         CLASS_TO_ID[class_name]
         for class_name in ("lane_left", "lane_center", "lane_right", "stop_line")
     ]
     return np.where(np.isin(class_map, kept_ids), class_map, CLASS_TO_ID["background"]).astype(class_map.dtype)
-
-
-def make_preview(image, class_map, mode: str):
-    if mode == "overlay":
-        return make_class_overlay(image, class_map)
-    return make_line_preview(image, class_map)
 
 
 def make_classmap_canvas(class_map, dtype):
@@ -301,15 +253,15 @@ def main() -> None:
                 class_map = postprocess_class_map(class_map)
 
             if perspective_config is None:
-                preview = make_preview(frame, class_map, args.preview)
+                preview = make_class_overlay(frame, class_map)
             else:
                 pre_perspective_preview = (
-                    make_preview(frame, class_map, args.preview) if args.show_pre_perspective else None
+                    make_class_overlay(frame, class_map) if args.show_pre_perspective else None
                 )
                 class_map = keep_lane_marking_classes(class_map)
                 class_map = apply_perspective(class_map, perspective_config, cv2.INTER_NEAREST)
                 classmap_canvas = make_classmap_canvas(class_map, frame.dtype)
-                preview = make_preview(classmap_canvas, class_map, args.preview)
+                preview = make_class_overlay(classmap_canvas, class_map)
                 if pre_perspective_preview is not None:
                     delay_right_edge = max(
                         1,

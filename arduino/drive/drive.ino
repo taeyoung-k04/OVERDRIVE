@@ -178,7 +178,7 @@ void execute_command(const char *message)
         if (speed >= 0)
             steeringSpeed = constrain(speed, 0, 255);
         else
-            driveSpeed = DEFAULT_DRIVE_SPEED;
+            steeringSpeed = DEFAULT_STEERING_SPEED;
         lastSteeringCmdTime = now;
     }
 }

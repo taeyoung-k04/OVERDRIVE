@@ -53,14 +53,10 @@ MIN_RUN_PIXELS = 2  # Minimum pixels in a row for lane fitting
 
 CONTROL_Y_RATIO = 0.78  # Y position where steering error is sampled
 
-MAX_GUIDED_YELLOW_DELTA_RATIO = 0.08  # Max mean x-delta before using green-guided yellow.
-MAX_CURVE_DELTA_RATIO = 0.05  # Max bend delta "
-MAX_CURVE_RATIO = 2.0  # Max yellow bend ratio "
-MIN_CURVE_SIGN_PX = 8.0  # Minimum bend magnitude before comparing curve direction.
-
 MAX_YELLOW_ROW_SEGMENTS = 1  # Max yellow blobs allowed in one row
 
 GAP_SMA_WINDOW = 7
+INITIAL_LANE_GAP_RATIO = 412.0 / 960.0
 MIN_VALID_GAP_RATIO = 0.18  # Minimum valid yellow-green gap
 MAX_VALID_GAP_RATIO = 0.60  # Maximum valid yellow-green gap
 
@@ -94,7 +90,7 @@ class GapTracker:
             self.values.append(float(observed_gap))
 
         if not self.values:
-            return None
+            return width * INITIAL_LANE_GAP_RATIO
         return float(np.mean(self.values))
 
 
@@ -170,11 +166,6 @@ def shifted_curve(curve: np.ndarray | None, x_offset: float) -> np.ndarray | Non
     return shifted
 
 
-def curve_mean_delta(first: np.ndarray, second: np.ndarray, top: int, bottom: int) -> float:
-    ys = np.linspace(top, bottom - 1, 24)
-    return float(np.mean(np.abs(np.polyval(first, ys) - np.polyval(second, ys))))
-
-
 def estimate_yellow_green_gap(class_map: np.ndarray, top: int, bottom: int) -> float | None:
     gaps = []
     center_mask = class_map == CLASS_TO_ID["lane_center"]
@@ -195,53 +186,12 @@ def estimate_yellow_green_gap(class_map: np.ndarray, top: int, bottom: int) -> f
     return float(np.median(gaps))
 
 
-def curve_bend_px(curve: np.ndarray, top: int, bottom: int) -> float:
-    span = float(bottom - top)
-    return float(curve[0] * span * span)
-
-
-def should_use_guided_center(
-    center_fit: np.ndarray,
-    guided_center_curve: np.ndarray,
-    top: int,
-    bottom: int,
-    width: int,
-) -> bool:
-    delta = curve_mean_delta(center_fit, guided_center_curve, top, bottom)
-    if delta > width * MAX_GUIDED_YELLOW_DELTA_RATIO:
-        return True
-
-    center_bend = curve_bend_px(center_fit, top, bottom)
-    guided_bend = curve_bend_px(guided_center_curve, top, bottom)
-    if abs(center_bend - guided_bend) > width * MAX_CURVE_DELTA_RATIO:
-        return True
-
-    if abs(center_bend) > MIN_CURVE_SIGN_PX and abs(guided_bend) > MIN_CURVE_SIGN_PX:
-        if np.sign(center_bend) != np.sign(guided_bend):
-            return True
-
-    guided_abs = max(abs(guided_bend), MIN_CURVE_SIGN_PX)
-    if abs(center_bend) > guided_abs * MAX_CURVE_RATIO:
-        return True
-
-    return False
-
-
 def select_center_curve(
     center_fit: np.ndarray | None,
     guided_center_curve: np.ndarray | None,
-    top: int,
-    bottom: int,
-    width: int,
 ) -> np.ndarray | None:
-    if center_fit is None:
+    if guided_center_curve is not None:
         return guided_center_curve
-    if guided_center_curve is None:
-        return center_fit
-
-    if should_use_guided_center(center_fit, guided_center_curve, top, bottom, width):
-        return guided_center_curve
-
     return center_fit
 
 
@@ -259,7 +209,7 @@ def calculate_lane_error(class_map: np.ndarray, gap_tracker: GapTracker) -> Lane
     observed_gap_px = estimate_yellow_green_gap(class_map, fit_top, fit_bottom)
     gap_px = gap_tracker.update(observed_gap_px, width)
     guided_center_fit = shifted_curve(raw_right_fit, -gap_px) if gap_px is not None else None
-    center_fit = select_center_curve(raw_center_fit, guided_center_fit, fit_top, fit_bottom, width)
+    center_fit = select_center_curve(raw_center_fit, guided_center_fit)
     center_lane_x = evaluate_curve_x(center_fit, control_y, width)
     right_lane_x = evaluate_curve_x(raw_right_fit, control_y, width)
 

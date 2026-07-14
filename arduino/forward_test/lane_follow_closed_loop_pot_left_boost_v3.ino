@@ -78,9 +78,9 @@ const bool SERIAL_MONITOR_TEST_MODE = false;
 
 const bool STEERING_CALIBRATED = true;
 
-const int POT_LEFT_RAW = 455;
-const int POT_CENTER_RAW = 396;
-const int POT_RIGHT_RAW = 313;
+const int POT_LEFT_RAW = 462; //462 455
+const int POT_CENTER_RAW = 400; //400 396
+const int POT_RIGHT_RAW = 317; //317 313
 
 // Separate steering limits. The left side is allowed to use more of its
 // calibrated range because the measured left travel is relatively small.
@@ -91,7 +91,7 @@ const int RIGHT_STEERING_TARGET_LIMIT = 900;
 // Scale incoming steering commands independently.
 // Example: -500 from Python becomes approximately -625 on the left.
 // Increase LEFT_STEERING_GAIN if the vehicle still turns left too weakly.
-const float LEFT_STEERING_GAIN = 1.00f;
+const float LEFT_STEERING_GAIN = 1.15f;
 const float RIGHT_STEERING_GAIN = 1.00f;
 
 // Fine straight-ahead trim in normalized units.

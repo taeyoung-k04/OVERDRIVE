@@ -36,9 +36,15 @@ python .\script\lane_detection\realtime_sem_class_camera.py --backend onnx --pos
 ```
 <br/>
 
-&emsp;Run with Perspective Warp
+### 🔹 Run Inference with the Semantic Segmentation Model (with Perspective Warp)
 ```bash
 python .\script\lane_detection\infer_sem_class.py --backend onnx --postprocess --perspective
 python .\script\lane_detection\render_sem_class_video.py --backend onnx --postprocess --perspective
 python .\script\lane_detection\realtime_sem_class_camera.py --backend onnx --postprocess --perspective --camera 1 --show-fps --show-pre-perspective
+```
+<br/>
+
+### 🔹 Lane Guidance (with Perspective Warp)
+```bash
+python .\script\lane_guidance.py --backend onnx --postprocess --perspective --camera 1 --show-fps
 ```

@@ -48,9 +48,9 @@ from control.intersection_controller import (
     IntersectionState,
 )
 
-from perception.stop_line_detector import (
-    StopLineDetector,
-)
+# from perception.stop_line_detector import (
+#     StopLineDetector,
+# )
 
 from perception.traffic_light_detector import (
     TrafficLightDetection,
@@ -171,12 +171,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--recovery-command-change-bonus", type=float, default=0.34)
     parser.add_argument("--recovery-new-command-weight", type=float, default=0.94)
     parser.add_argument("--recovery-min-confidence", type=float, default=0.28)
-    parser.add_argument("--recovery-speed", type=int, default=65)
+    parser.add_argument("--recovery-speed", type=int, default=200)
 
     # Short semantic dropouts are bridged with the most recent fitted lane.
     # Time-based limits are used so behavior is similar at different FPS.
     parser.add_argument("--lane-loss-grace-seconds", type=float, default=1.20)
-    parser.add_argument("--lane-loss-speed", type=int, default=70)
+    parser.add_argument("--lane-loss-speed", type=int, default=200)
     parser.add_argument("--lane-loss-straighten-delay", type=float, default=0.30)
     parser.add_argument("--lane-loss-min-steering-retain", type=float, default=0.38)
     parser.add_argument("--lane-loss-confidence-decay", type=float, default=0.80)
@@ -190,14 +190,42 @@ def parse_args() -> argparse.Namespace:
 
     # Drive-speed conversion. Steering remains normalized (-1.0..+1.0)
     # and is converted to -1000..+1000 only at the serial boundary.
-    parser.add_argument("--speed-straight", type=int, default=100)
-    parser.add_argument("--speed-turn", type=int, default=78)
-    parser.add_argument("--speed-min", type=int, default=65)
+    parser.add_argument("--speed-straight", type=int, default=255)
+    parser.add_argument("--speed-turn", type=int, default=255)
+    parser.add_argument("--speed-min", type=int, default=100)
     parser.add_argument(
         "--constant-speed",
         type=int,
         default=None,
         help="Use a fixed forward PWM (0..255) instead of slowing on turns.",
+    )
+
+    # Lane-change maneuver. The target lane reference changes immediately, but
+    # steering and speed are temporarily overridden to make the lateral move
+    # decisive instead of relying only on the normal lane-following error.
+    parser.add_argument(
+        "--lane-change-steering",
+        type=float,
+        default=1.0,
+        help="Absolute normalized steering used during the hard lane-change phase (0..1).",
+    )
+    parser.add_argument(
+        "--lane-change-speed",
+        type=int,
+        default=175,
+        help="Maximum forward PWM while a lane change is active (0..255).",
+    )
+    parser.add_argument(
+        "--lane-change-full-steer-seconds",
+        type=float,
+        default=0.80,
+        help="How long to hold maximum steering at the start of a lane change.",
+    )
+    parser.add_argument(
+        "--lane-change-total-seconds",
+        type=float,
+        default=1.50,
+        help="Total time to keep lane-change speed limiting active.",
     )
 
     # Arduino serial. The matching sketch uses C,<steering>,<speed> and X.
@@ -273,12 +301,126 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--command-rate must be positive")
     if args.telemetry_stale_seconds <= 0:
         raise SystemExit("--telemetry-stale-seconds must be positive")
-    for name in ("speed_straight", "speed_turn", "speed_min", "recovery_speed", "lane_loss_speed"):
+    if not 0.0 < args.lane_change_steering <= 1.0:
+        raise SystemExit("--lane-change-steering must be greater than 0 and at most 1")
+    if args.lane_change_full_steer_seconds < 0:
+        raise SystemExit("--lane-change-full-steer-seconds must be non-negative")
+    if args.lane_change_total_seconds <= 0:
+        raise SystemExit("--lane-change-total-seconds must be positive")
+    if args.lane_change_full_steer_seconds > args.lane_change_total_seconds:
+        raise SystemExit(
+            "--lane-change-full-steer-seconds must not exceed "
+            "--lane-change-total-seconds"
+        )
+    for name in (
+        "speed_straight",
+        "speed_turn",
+        "speed_min",
+        "recovery_speed",
+        "lane_loss_speed",
+        "lane_change_speed",
+    ):
         value = int(getattr(args, name))
         if not 0 <= value <= 255:
             raise SystemExit(f"--{name.replace('_', '-')} must be between 0 and 255")
     if args.constant_speed is not None and not 0 <= args.constant_speed <= 255:
         raise SystemExit("--constant-speed must be between 0 and 255")
+
+
+class LaneChangeManeuver:
+    """Temporarily override steering and speed during a lane change."""
+
+    def __init__(self, args: argparse.Namespace) -> None:
+        self.max_steering = float(args.lane_change_steering)
+        self.speed_cap = int(args.lane_change_speed)
+        self.full_steer_seconds = float(args.lane_change_full_steer_seconds)
+        self.total_seconds = float(args.lane_change_total_seconds)
+        self.steering_sign = float(args.steering_sign)
+
+        self.active = False
+        self.started_at = 0.0
+        self.direction = 0.0
+        self.direction_name = "NONE"
+        self.target_lane: DrivingLane | None = None
+
+    def start(
+        self,
+        previous_lane: DrivingLane,
+        target_lane: DrivingLane,
+        *,
+        now: float,
+    ) -> None:
+        if previous_lane == target_lane:
+            return
+
+        # LANE_1 is the left lane and LANE_2 is the right lane.
+        # steering_sign keeps this consistent with the normal follower's
+        # configured hardware direction.
+        moving_left = (
+            previous_lane == DrivingLane.LANE_2
+            and target_lane == DrivingLane.LANE_1
+        )
+        self.direction = -1.0 if moving_left else 1.0
+        self.direction_name = "LEFT" if moving_left else "RIGHT"
+        self.target_lane = target_lane
+        self.started_at = now
+        self.active = True
+
+        print(
+            f"LANE CHANGE START: {self.direction_name}, "
+            f"steering={self.steering_command:+.2f}, "
+            f"speed_cap={self.speed_cap}, "
+            f"full_steer={self.full_steer_seconds:.2f}s, "
+            f"total={self.total_seconds:.2f}s",
+            flush=True,
+        )
+
+    @property
+    def steering_command(self) -> float:
+        return self.direction * self.max_steering * self.steering_sign
+
+    def cancel(self, reason: str | None = None) -> None:
+        if self.active and reason:
+            print(f"LANE CHANGE CANCELLED: {reason}", flush=True)
+        self.active = False
+        self.direction = 0.0
+        self.direction_name = "NONE"
+        self.target_lane = None
+
+    def apply(
+        self,
+        *,
+        now: float,
+        base_steering: float,
+        base_speed: int,
+    ) -> tuple[float, int]:
+        if not self.active:
+            return base_steering, base_speed
+
+        elapsed = now - self.started_at
+        if elapsed >= self.total_seconds:
+            print(
+                f"LANE CHANGE COMPLETE: target={self.target_lane.name if self.target_lane else 'UNKNOWN'}",
+                flush=True,
+            )
+            self.cancel()
+            return base_steering, base_speed
+
+        # Never increase a speed restriction imposed by another controller.
+        limited_speed = min(int(base_speed), self.speed_cap)
+
+        # Hold the wheel at the configured maximum only for the initial phase.
+        # Afterwards, keep the reduced speed but let the lane follower settle
+        # onto the newly selected reference line.
+        if elapsed < self.full_steer_seconds:
+            return self.steering_command, limited_speed
+
+        return base_steering, limited_speed
+
+    def remaining_seconds(self, now: float) -> float:
+        if not self.active:
+            return 0.0
+        return max(0.0, self.total_seconds - (now - self.started_at))
 
 
 def main() -> None:
@@ -342,15 +484,15 @@ def main() -> None:
         args.initial_lane
     )
 
-    #intersection Controller
-    stop_line_detector = StopLineDetector(
-        roi_top_ratio=0.45,
-        trigger_y_ratio=0.72,
-        history_size=5,
-        confirm_frames=3,
-        vehicle_x_ratio=args.vehicle_x_ratio,
-        vehicle_corridor_ratio=0.30,
-    )
+    # #intersection Controller
+    # stop_line_detector = StopLineDetector(
+    #     roi_top_ratio=0.45,
+    #     trigger_y_ratio=0.72,
+    #     history_size=5,
+    #     confirm_frames=3,
+    #     vehicle_x_ratio=args.vehicle_x_ratio,
+    #     vehicle_corridor_ratio=0.30,
+    # )
 
     traffic_light_detector = TrafficLightDetector(
         roi_bottom_ratio=0.70,
@@ -359,19 +501,21 @@ def main() -> None:
         stable_frames=3,
     )
 
-    intersection_controller = IntersectionController(
-        # 정지선이 8프레임 연속 사라지면 교차로 통과 완료
-        clear_confirm_frames=8,
+    # intersection_controller = IntersectionController(
+    #     # 정지선이 8프레임 연속 사라지면 교차로 통과 완료
+    #     clear_confirm_frames=8,
 
-        # 정지선 인식이 계속 남는 경우를 위한 안전한 timeout
-        max_clearing_seconds=3.0,
+    #     # 정지선 인식이 계속 남는 경우를 위한 안전한 timeout
+    #     max_clearing_seconds=3.0,
+    #     minimum_green_confidence=0.55,
+    #     # 정차 중에는 마지막 조향각 유지
+    #     hold_steering_while_stopped=True,
 
-        # 정차 중에는 마지막 조향각 유지
-        hold_steering_while_stopped=True,
-
-        # 초록불 출발 시 너무 빠르게 튀어나가는 것을 방지
-        departure_speed_cap=80,
-    )
+    #     # 초록불 출발 시 너무 빠르게 튀어나가는 것을 방지
+    #     departure_speed_cap=80,
+    #     signal_memory_seconds=1.5,
+    #     minimum_stop_seconds=2.0,
+    # )
 
     #avoid Obstacle
     obstacle_avoidance = ObstacleAvoidanceController(
@@ -379,6 +523,8 @@ def main() -> None:
         detection_confirm_frames=3,
         clear_confirm_frames=10,
     )
+
+    lane_change = LaneChangeManeuver(args)
 
     # 라이다 연결 전 임시 테스트값
     mock_front_blocked = False
@@ -421,15 +567,12 @@ def main() -> None:
             else:
                 processed_class_map = raw_class_map
 
-            stop_line_detection = stop_line_detector.detect(
-                raw_class_map,
-            )
-            traffic_light_detection: TrafficLightDetection | None = None
-
-            if intersection_controller.requires_traffic_light:
-                traffic_light_detection = traffic_light_detector.detect(
-                    frame,
-                )
+            # stop_line_detection = stop_line_detector.detect(
+            #     raw_class_map,
+            # )
+            # traffic_light_detection = traffic_light_detector.detect(
+            #     frame,
+            # )
 
             control_class_map = (
                 raw_class_map if args.control_source == "raw" else processed_class_map
@@ -451,8 +594,8 @@ def main() -> None:
             # 주행 중일 때만 장애물로 차선을 변경
             if (
                 driving_enabled
-                and intersection_controller.allows_obstacle_avoidance
-                and not stop_line_detection.should_stop
+                # and intersection_controller.allows_obstacle_avoidance
+                #and not stop_line_detection.should_stop
             ):
                 previous_lane = current_lane
 
@@ -463,6 +606,13 @@ def main() -> None:
                 current_lane = avoidance_command.target_lane
 
                 if avoidance_command.lane_change_requested:
+                    follower.reset()
+                    lane_detector.reset()
+                    lane_change.start(
+                        previous_lane,
+                        current_lane,
+                        now=time.perf_counter(),
+                    )
                     print(
                         "Obstacle detected: "
                         f"{previous_lane.name} -> {current_lane.name}",
@@ -483,43 +633,69 @@ def main() -> None:
                 offset_ratio=reference.offset_ratio,
             )
 
-            intersection_control = intersection_controller.update(
-                stop_line=stop_line_detection,
-                traffic_light=traffic_light_detection,
+            # # intersection_control = intersection_controller.update(
+            # #     stop_line=stop_line_detection,
+            # #     traffic_light=traffic_light_detection,
 
-                # lane follower가 원래 보내려던 명령
-                base_steering=control.steering,
-                base_speed=control.speed,
+            # #     # lane follower가 원래 보내려던 명령
+            # #     base_steering=control.steering,
+            # #     base_speed=control.speed,
 
-                driving_enabled=driving_enabled,
+            # #     driving_enabled=driving_enabled,
+            # # )
+
+            # # 교차로 대기 상태에 처음 진입한 프레임에서만 실행된다.
+            # if intersection_control.entered_waiting:
+            #     obstacle_avoidance.reset(current_lane)
+
+            #     print(
+            #         "INTERSECTION: waiting for green.",
+            #         flush=True,
+            #     )
+
+            # if intersection_control.reset_traffic_light_detector:
+            #     traffic_light_detector.reset()
+            # if intersection_control.released_on_green:
+            #     print(
+            #         "INTERSECTION: green confirmed, departing.",
+            #         flush=True,
+            #     )
+
+            # if intersection_control.intersection_cleared:
+            #     print(
+            #         "INTERSECTION: cleared, normal driving resumed.",
+            #         flush=True,
+            #     )
+
+            command_now = time.perf_counter()
+            # final_steering = intersection_control.steering
+            # final_speed = intersection_control.speed
+            final_steering = control.steering
+            final_speed = control.speed
+
+            # Intersection/stop commands always have priority. A lane-change
+            # override is allowed only while normal obstacle avoidance is
+            # permitted and the vehicle has a positive drive command.
+            lane_change_allowed = (
+                driving_enabled
+                # and intersection_controller.allows_obstacle_avoidance
+                # and final_speed > 0
             )
-
-            # 교차로 대기 상태에 처음 진입한 프레임에서만 실행된다.
-            if intersection_control.entered_waiting:
-                obstacle_avoidance.reset(current_lane)
-
-                print(
-                    "INTERSECTION: waiting for green.",
-                    flush=True,
+            if lane_change.active and not lane_change_allowed:
+                lane_change.cancel("intersection or stop command has priority")
+            elif lane_change_allowed:
+                final_steering, final_speed = lane_change.apply(
+                    now=command_now,
+                    base_steering=final_steering,
+                    base_speed=final_speed,
                 )
 
-            if intersection_control.reset_traffic_light_detector:
-                traffic_light_detector.reset()
-            if intersection_control.released_on_green:
-                print(
-                    "INTERSECTION: green confirmed, departing.",
-                    flush=True,
-                )
-
-            if intersection_control.intersection_cleared:
-                print(
-                    "INTERSECTION: cleared, normal driving resumed.",
-                    flush=True,
-                )
+            # if driving_enabled and arduino.enabled:
+            #     arduino.update_command(final_steering, final_speed)
 
             if driving_enabled and arduino.enabled:
-                arduino.update_command(intersection_control.steering, intersection_control.speed)
-
+                arduino.update_command(control.steering, control.speed)
+                
             telemetry = arduino.telemetry_snapshot(args.telemetry_stale_seconds)
             preview = make_class_overlay(frame, processed_class_map)
             if args.preview == "debug":
@@ -537,10 +713,27 @@ def main() -> None:
                     telemetry=telemetry,
                 )
                 
-                draw_intersection_debug(
-                    preview,
-                    intersection_control,
-                )
+                # draw_intersection_debug(
+                #     preview,
+                #     intersection_control,
+                # )
+
+                if lane_change.active:
+                    cv2.putText(
+                        preview,
+                        (
+                            f"LANE CHANGE {lane_change.direction_name}: "
+                            f"steer={final_steering:+.2f} "
+                            f"speed={final_speed} "
+                            f"remaining={lane_change.remaining_seconds(command_now):.1f}s"
+                        ),
+                        (12, frame.shape[0] - 18),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.55,
+                        (0, 255, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
 
             now = time.perf_counter()
             elapsed = now - previous_time
@@ -561,6 +754,7 @@ def main() -> None:
                     arduino.emergency_stop()
                     follower.reset()
                     lane_detector.reset()
+                    lane_change.cancel()
                     print("STOPPED: drive and steering outputs disabled.", flush=True)
                 else:
                     if arduino.configured and not arduino.enabled:
@@ -586,47 +780,62 @@ def main() -> None:
                 arduino.emergency_stop()
                 follower.reset()
                 lane_detector.reset()
+                lane_change.cancel()
                 print("EMERGENCY STOP: drive and steering outputs disabled.", flush=True)
             if key in (ord("r"), ord("R")):
                 driving_enabled = False
                 arduino.emergency_stop()
                 follower.reset()
                 lane_detector.reset()
+                lane_change.cancel()
                 if arduino.enabled:
                     arduino.reset_fault()
                     print("ARDUINO FAULT RESET requested. Keep the vehicle stopped and check telemetry.", flush=True)
                 else:
                     print("Arduino is not connected; press SPACE once to connect.", flush=True)
-            if key == ord("1"):
-                if driving_enabled:
-                    print(
-                        "Stop the vehicle before manually selecting lane 1.",
-                        flush=True,
-                    )
-                else:
-                    current_lane = DrivingLane.LANE_1
+            if key in (ord("1"), ord("2")):
+                requested_lane = (
+                    DrivingLane.LANE_1
+                    if key == ord("1")
+                    else DrivingLane.LANE_2
+                )
+
+                if requested_lane != current_lane:
+                    previous_lane = current_lane
+                    current_lane = requested_lane
+
+                    # 수동으로 선택한 차선을 장애물 회피 제어기에도 즉시 반영
                     obstacle_avoidance.reset(current_lane)
+
+                    # 기존 차선 기준으로 저장돼 있던 조향 및 차선 검출 이력을 제거
                     follower.reset()
                     lane_detector.reset()
 
-                    print(
-                        "Selected LANE 1: following lane_center",
-                        flush=True,
+                    if driving_enabled:
+                        lane_change.start(
+                            previous_lane,
+                            current_lane,
+                            now=time.perf_counter(),
+                        )
+                    else:
+                        lane_change.cancel()
+
+                    lane_reference_name = (
+                        "lane_center"
+                        if current_lane == DrivingLane.LANE_1
+                        else "lane_right"
                     )
-            if key == ord("2"):
-                if driving_enabled:
+                    drive_state = "DRIVING" if driving_enabled else "STOPPED"
+
                     print(
-                        "Stop the vehicle before manually selecting lane 2.",
+                        f"MANUAL LANE CHANGE [{drive_state}]: "
+                        f"{previous_lane.name} -> {current_lane.name} "
+                        f"(following {lane_reference_name})",
                         flush=True,
                     )
                 else:
-                    current_lane = DrivingLane.LANE_2
-                    obstacle_avoidance.reset(current_lane)
-                    follower.reset()
-                    lane_detector.reset()
-
                     print(
-                        "Selected LANE 2: following lane_right",
+                        f"Already following {current_lane.name}.",
                         flush=True,
                     )
             if key in (ord("o"), ord("O")):

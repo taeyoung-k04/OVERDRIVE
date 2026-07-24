@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run YOLO semantic segmentation and save classified lane-marking results."""
+"""Run YOLO semantic segmentation and save lane/object class results."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from utils.postprocess import (
 )
 
 
-DEFAULT_WEIGHTS = Path("runs/semantic/yolo_lane_sem_class/train_cpu_640_yolo26n_ade20k/weights/best.pt")
+DEFAULT_WEIGHTS = Path("runs/semantic/yolo_lane_sem_class/train_cpu_640_yolo26n_8class/weights/best.pt")
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp"}
 
 MASK_OUTPUTS = {
@@ -30,6 +30,8 @@ MASK_OUTPUTS = {
     "lane_center_mask": CLASS_TO_ID["lane_center"],
     "lane_right_mask": CLASS_TO_ID["lane_right"],
     "stop_line_mask": CLASS_TO_ID["stop_line"],
+    "car_mask": CLASS_TO_ID["car"],
+    "traffic_light_mask": CLASS_TO_ID["traffic_light"],
 }
 
 OVERLAY_COLORS = {
@@ -38,9 +40,19 @@ OVERLAY_COLORS = {
     CLASS_TO_ID["lane_center"]: (0, 230, 255),
     CLASS_TO_ID["lane_right"]: (80, 255, 80),
     CLASS_TO_ID["stop_line"]: (0, 0, 255),
+    CLASS_TO_ID["car"]: (255, 0, 255),
+    CLASS_TO_ID["traffic_light"]: (0, 165, 255),
 }
 OVERLAY_ALPHA = 0.32
-OVERLAY_CLASS_NAMES = ("road", "lane_left", "lane_center", "lane_right", "stop_line")
+OVERLAY_CLASS_NAMES = (
+    "road",
+    "lane_left",
+    "lane_center",
+    "lane_right",
+    "stop_line",
+    "car",
+    "traffic_light",
+)
 
 
 def resolve_model_path(weights: Path, backend: str) -> Path:

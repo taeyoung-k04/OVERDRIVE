@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Show real-time classified lane semantic overlay from a camera."""
+"""Show real-time lane, car, and traffic-light semantic overlay from a camera."""
 
 from __future__ import annotations
 
@@ -45,16 +45,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--width", type=int, default=960, help="Camera/frame width. 0 keeps camera default.")
     parser.add_argument("--height", type=int, default=540, help="Camera/frame height. 0 keeps camera default.")
     parser.add_argument("--camera-fps", type=int, default=20, help="Requested camera FPS. 0 keeps camera default.")
-    parser.add_argument(
-        "--no-force-size",
-        action="store_true",
-        help="Do not resize frames when the camera ignores the requested size.",
-    )
-    parser.add_argument(
-        "--buffered-camera",
-        action="store_true",
-        help="Use normal blocking camera reads instead of the low-latency latest-frame reader.",
-    )
     parser.add_argument("--flip", action="store_true", help="Horizontally flip camera frames before inference.")
     parser.add_argument("--show-fps", action="store_true", help="Draw measured FPS on the overlay.")
     parser.add_argument(
@@ -148,6 +138,26 @@ def keep_lane_marking_classes(class_map):
     return np.where(np.isin(class_map, kept_ids), class_map, CLASS_TO_ID["background"]).astype(class_map.dtype)
 
 
+def keep_realtime_display_classes(class_map):
+    """Keep lane markings and object classes for the perspective preview."""
+    kept_ids = [
+        CLASS_TO_ID[class_name]
+        for class_name in (
+            "lane_left",
+            "lane_center",
+            "lane_right",
+            "stop_line",
+            "car",
+            "traffic_light",
+        )
+    ]
+    return np.where(
+        np.isin(class_map, kept_ids),
+        class_map,
+        CLASS_TO_ID["background"],
+    ).astype(class_map.dtype)
+
+
 def make_classmap_canvas(class_map, dtype):
     height, width = class_map.shape[:2]
     return np.zeros((height, width, 3), dtype=dtype)
@@ -207,7 +217,7 @@ def main() -> None:
     model = load_semantic_model(args.weights, args.backend)
 
     capture = open_camera(args.camera, args.width, args.height, args.camera_fps)
-    reader = None if args.buffered_camera else LatestFrameReader(capture)
+    reader = LatestFrameReader(capture)
     actual_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     actual_fps = capture.get(cv2.CAP_PROP_FPS)
@@ -217,7 +227,7 @@ def main() -> None:
         flush=True,
     )
 
-    window_name = "Lane Semantic Class Overlay"
+    window_name = "Lane and Object Semantic Class Overlay"
     cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
 
     previous_time = time.perf_counter()
@@ -226,17 +236,13 @@ def main() -> None:
     try:
         while True:
             delay_right_edge = None
-            if reader is not None:
-                ok, frame, frame_time = reader.read_with_timestamp()
-            else:
-                ok, frame = capture.read()
-                frame_time = time.perf_counter()
+            ok, frame, frame_time = reader.read_with_timestamp()
             if not ok:
                 raise RuntimeError("Could not read a frame from the camera")
 
             if args.flip:
                 frame = cv2.flip(frame, 1)
-            frame = normalize_frame_size(frame, args.width, args.height, not args.no_force_size)
+            frame = normalize_frame_size(frame, args.width, args.height, True)
             perspective_config = make_perspective_config(args, frame.shape[:2])
 
             results = model.predict(
@@ -258,7 +264,7 @@ def main() -> None:
                 pre_perspective_preview = (
                     make_class_overlay(frame, class_map) if args.show_pre_perspective else None
                 )
-                class_map = keep_lane_marking_classes(class_map)
+                class_map = keep_realtime_display_classes(class_map)
                 class_map = apply_perspective(class_map, perspective_config, cv2.INTER_NEAREST)
                 classmap_canvas = make_classmap_canvas(class_map, frame.dtype)
                 preview = make_class_overlay(classmap_canvas, class_map)
@@ -283,8 +289,7 @@ def main() -> None:
             if key in (ord("q"), 27):
                 break
     finally:
-        if reader is not None:
-            reader.stop()
+        reader.stop()
         capture.release()
         cv2.destroyAllWindows()
 

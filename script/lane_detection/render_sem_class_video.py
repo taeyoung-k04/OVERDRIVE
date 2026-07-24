@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render videos using the classified lane semantic model."""
+"""Render videos using the lane, car, and traffic-light semantic model."""
 
 from __future__ import annotations
 
@@ -71,18 +71,22 @@ def render_video(
 
     source_fps = capture.get(cv2.CAP_PROP_FPS) or output_fps
     total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-    width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    perspective_config = make_perspective_config(args, (height, width))
+    source_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+    source_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    force_size = args.width > 0 and args.height > 0
+    frame_width = args.width if force_size else source_width
+    frame_height = args.height if force_size else source_height
+    output_width, output_height = frame_width, frame_height
+    perspective_config = make_perspective_config(args, (frame_height, frame_width))
     if perspective_config is not None:
-        width, height = perspective_config.output_size
+        output_width, output_height = perspective_config.output_size
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
         str(destination),
         cv2.VideoWriter_fourcc(*"mp4v"),
         output_fps,
-        (width, height),
+        (output_width, output_height),
     )
     if not writer.isOpened():
         capture.release()
@@ -104,6 +108,12 @@ def render_video(
         if time_seconds + 1e-9 < next_time:
             continue
 
+        if force_size and frame.shape[:2] != (frame_height, frame_width):
+            frame = cv2.resize(
+                frame,
+                (frame_width, frame_height),
+                interpolation=cv2.INTER_AREA,
+            )
         batch.append(frame)
         next_time += frame_step_time
         if len(batch) >= batch_size:
@@ -134,10 +144,12 @@ def parse_args() -> argparse.Namespace:
         help="Path to .pt or .onnx weights. With --backend onnx, a .pt suffix is replaced with .onnx.",
     )
     parser.add_argument("--backend", choices=("auto", "pt", "onnx"), default="auto")
-    parser.add_argument("--fps", type=float, default=15.0)
+    parser.add_argument("--fps", type=float, default=7.0)
     parser.add_argument("--imgsz", type=int, default=640)
-    parser.add_argument("--batch", type=int, default=4)
+    parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--width", type=int, default=960, help="Frame width. 0 keeps the source size.")
+    parser.add_argument("--height", type=int, default=540, help="Frame height. 0 keeps the source size.")
     add_perspective_args(parser)
     add_postprocess_args(parser)
     return parser.parse_args()
@@ -145,6 +157,15 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+
+    uses_onnx = args.backend == "onnx" or (args.backend == "auto" and args.weights.suffix.lower() == ".onnx")
+    if uses_onnx and args.batch != 1:
+        print(
+            f"ONNX inference uses batch size 1 (requested --batch {args.batch}). "
+            "Export the model with dynamic batching to use larger batches.",
+            flush=True,
+        )
+        args.batch = 1
 
     model = load_semantic_model(args.weights, args.backend)
     sources = sorted(args.input.glob("*.mp4"))

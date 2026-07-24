@@ -13,6 +13,8 @@ CLASS_TO_ID = {
     "lane_center": 3,
     "lane_right": 4,
     "stop_line": 5,
+    "car": 6,
+    "traffic_light": 7,
 }
 
 DEFAULT_ROAD_GAP_PX = 48.0
@@ -20,7 +22,7 @@ DEFAULT_LANE_GAP_PX = 16.0
 DEFAULT_STOP_LINE_MIN_AREA_PX = 1024.0
 DEFAULT_POSTPROCESS_REFERENCE_WIDTH = 960.0
 DEFAULT_POSTPROCESS_REFERENCE_HEIGHT = 540.0
-POSTPROCESS_TOP_REMOVE_RATIO = 0.25
+POSTPROCESS_TOP_REMOVE_RATIO = 0.30
 
 
 def _distance_to_mask(mask: np.ndarray) -> np.ndarray:
@@ -99,7 +101,16 @@ def postprocess_class_map(class_map: np.ndarray) -> np.ndarray:
     processed = class_map.copy()
     top_cutoff = int(round(processed.shape[0] * POSTPROCESS_TOP_REMOVE_RATIO))
     if top_cutoff > 0:
-        processed[:top_cutoff, :] = CLASS_TO_ID["background"]
+        top = processed[:top_cutoff, :]
+        lane_scene_ids = tuple(
+            CLASS_TO_ID[name]
+            for name in ("road", "lane_left", "lane_center", "lane_right", "stop_line")
+        )
+        top[np.isin(top, lane_scene_ids)] = CLASS_TO_ID["background"]
+    # Lane-scene postprocessing uses the lower 60% of the image. Traffic
+    # lights use the complementary upper 40% and are never road-filtered.
+    lower_roi = processed[top_cutoff:, :]
+    lower_roi[lower_roi == CLASS_TO_ID["traffic_light"]] = CLASS_TO_ID["background"]
 
     road_gap_px = _distance_threshold_px(class_map.shape, DEFAULT_ROAD_GAP_PX)
     lane_gap_px = _distance_threshold_px(class_map.shape, DEFAULT_LANE_GAP_PX)

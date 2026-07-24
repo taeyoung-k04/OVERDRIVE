@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a YOLO semantic dataset for classified lane markings."""
+"""Build a YOLO semantic dataset for lanes, cars, and traffic lights."""
 
 from __future__ import annotations
 
@@ -19,6 +19,8 @@ CLASS_NAMES = (
     "lane_center",
     "lane_right",
     "stop_line",
+    "car",
+    "traffic_light",
 )
 BACKGROUND_ID = 0
 ROAD_ID = 1
@@ -26,6 +28,8 @@ LANE_LEFT_ID = 2
 LANE_CENTER_ID = 3
 LANE_RIGHT_ID = 4
 STOP_LINE_ID = 5
+CAR_ID = 6
+TRAFFIC_LIGHT_ID = 7
 IGNORE_ID = 255
 
 LABEL_TO_ID = {
@@ -37,6 +41,11 @@ LABEL_TO_ID = {
 }
 
 PAINT_LABELS = ("lane_left", "lane_center", "lane_right", "stop_line")
+YOLO_POLYGON_LABELS = {
+    0: CAR_ID,
+    1: TRAFFIC_LIGHT_ID,
+}
+YOLO_POLYGON_DIR = "car_traffic_light"
 FRAME_RE = re.compile(r"frame_(\d+)s")
 
 
@@ -100,6 +109,13 @@ def labeled_frames(label_root: Path) -> list[tuple[str, int]]:
         route, kind = path.relative_to(label_root).parts[:2]
         if kind in LABEL_TO_ID:
             frames.add((route, frame_second(path)))
+    # Empty txt files are valid negative annotations, so include every YOLO
+    # polygon file rather than only files containing an object.
+    for path in label_root.glob(f"*/{YOLO_POLYGON_DIR}/*.txt"):
+        if path.name.endswith("~"):
+            continue
+        route = path.relative_to(label_root).parts[0]
+        frames.add((route, frame_second(path)))
     return sorted(frames)
 
 
@@ -108,6 +124,40 @@ def _read_optional_mask(label_root: Path, route: str, kind: str, second: int, sh
     if not path.exists():
         return None
     return read_mask(path, shape)
+
+
+def paint_yolo_polygons(
+    semantic: np.ndarray,
+    path: Path,
+) -> None:
+    """Rasterize YOLO26 ``class x1 y1 ...`` polygons into a class map."""
+    if not path.exists():
+        return
+
+    height, width = semantic.shape
+    for line_number, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        fields = raw_line.split()
+        if not fields:
+            continue
+        try:
+            source_class = int(fields[0])
+            coordinates = np.asarray(fields[1:], dtype=np.float32)
+        except ValueError as exc:
+            raise ValueError(f"Invalid YOLO polygon at {path}:{line_number}") from exc
+        if source_class not in YOLO_POLYGON_LABELS:
+            raise ValueError(
+                f"Unknown YOLO polygon class {source_class} at {path}:{line_number}"
+            )
+        if coordinates.size < 6 or coordinates.size % 2:
+            raise ValueError(
+                f"YOLO polygon needs at least 3 x/y points at {path}:{line_number}"
+            )
+
+        points = coordinates.reshape(-1, 2)
+        points[:, 0] = np.clip(points[:, 0], 0.0, 1.0) * (width - 1)
+        points[:, 1] = np.clip(points[:, 1], 0.0, 1.0) * (height - 1)
+        polygon = np.rint(points).astype(np.int32)
+        cv2.fillPoly(semantic, [polygon], YOLO_POLYGON_LABELS[source_class])
 
 
 def build_semantic_mask(
@@ -141,6 +191,13 @@ def build_semantic_mask(
         if paint_kernel is not None:
             mask = cv2.dilate(mask, paint_kernel)
         semantic[mask > 0] = LABEL_TO_ID[kind]
+
+    # Object polygons go last so small traffic lights and cars are not hidden
+    # by the broad road mask.
+    polygon_path = (
+        label_root / route / YOLO_POLYGON_DIR / f"frame_{second:06d}s.txt"
+    )
+    paint_yolo_polygons(semantic, polygon_path)
 
     return semantic
 

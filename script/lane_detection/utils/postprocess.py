@@ -17,8 +17,11 @@ CLASS_TO_ID = {
     "traffic_light": 7,
 }
 
-DEFAULT_ROAD_GAP_PX = 48.0
-DEFAULT_LANE_GAP_PX = 16.0
+DEFAULT_INITIAL_MAIN_ROAD_MAX_AREA_PX = 25600.0
+DEFAULT_INITIAL_ROAD_GAP_PX = 48.0
+DEFAULT_ROAD_GAP_X_PX = 6.0
+DEFAULT_ROAD_GAP_Y_PX = 32.0
+DEFAULT_LANE_GAP_PX = 20.0
 DEFAULT_STOP_LINE_MIN_AREA_PX = 1024.0
 DEFAULT_POSTPROCESS_REFERENCE_WIDTH = 960.0
 DEFAULT_POSTPROCESS_REFERENCE_HEIGHT = 540.0
@@ -77,6 +80,32 @@ def _distance_threshold_px(shape: tuple[int, int], value_px: float) -> float:
     return value_px * ((width_scale + height_scale) * 0.5)
 
 
+def _scaled_neighborhood_radii(
+    shape: tuple[int, int],
+    radius_x_px: float,
+    radius_y_px: float,
+) -> tuple[int, int]:
+    height, width = shape[:2]
+    radius_x = max(0, int(round(radius_x_px * float(width) / DEFAULT_POSTPROCESS_REFERENCE_WIDTH)))
+    radius_y = max(0, int(round(radius_y_px * float(height) / DEFAULT_POSTPROCESS_REFERENCE_HEIGHT)))
+    return radius_x, radius_y
+
+
+def _diamond_neighborhood(
+    mask: np.ndarray,
+    radius_x: int,
+    radius_y: int,
+) -> np.ndarray:
+    if radius_x <= 0 and radius_y <= 0:
+        return mask.copy()
+
+    ys, xs = np.ogrid[-radius_y : radius_y + 1, -radius_x : radius_x + 1]
+    x_distance = np.abs(xs) / radius_x if radius_x > 0 else np.where(xs == 0, 0.0, np.inf)
+    y_distance = np.abs(ys) / radius_y if radius_y > 0 else np.where(ys == 0, 0.0, np.inf)
+    kernel = (x_distance + y_distance <= 1.0).astype(np.uint8)
+    return cv2.dilate(mask.astype(np.uint8), kernel, iterations=1).astype(bool)
+
+
 def _area_threshold_px(shape: tuple[int, int], value_px: float) -> float:
     height, width = shape[:2]
     area_scale = float(width * height) / (
@@ -112,7 +141,19 @@ def postprocess_class_map(class_map: np.ndarray) -> np.ndarray:
     lower_roi = processed[top_cutoff:, :]
     lower_roi[lower_roi == CLASS_TO_ID["traffic_light"]] = CLASS_TO_ID["background"]
 
-    road_gap_px = _distance_threshold_px(class_map.shape, DEFAULT_ROAD_GAP_PX)
+    road_gap_x_px, road_gap_y_px = _scaled_neighborhood_radii(
+        class_map.shape,
+        DEFAULT_ROAD_GAP_X_PX,
+        DEFAULT_ROAD_GAP_Y_PX,
+    )
+    initial_main_road_max_area_px = _area_threshold_px(
+        class_map.shape,
+        DEFAULT_INITIAL_MAIN_ROAD_MAX_AREA_PX,
+    )
+    initial_road_gap_px = _distance_threshold_px(
+        class_map.shape,
+        DEFAULT_INITIAL_ROAD_GAP_PX,
+    )
     lane_gap_px = _distance_threshold_px(class_map.shape, DEFAULT_LANE_GAP_PX)
     stop_line_min_area_px = _area_threshold_px(class_map.shape, DEFAULT_STOP_LINE_MIN_AREA_PX)
     road_id = CLASS_TO_ID["road"]
@@ -125,13 +166,27 @@ def postprocess_class_map(class_map: np.ndarray) -> np.ndarray:
         return processed
 
     count, labels, _, _ = cv2.connectedComponentsWithStats(road_mask.astype(np.uint8), 8)
-    main_distance = _distance_to_mask(main_road)
     merged_main_road = main_road.copy()
+
+    if np.count_nonzero(main_road) <= initial_main_road_max_area_px:
+        main_distance = _distance_to_mask(main_road)
+        for label in range(1, count):
+            component = labels == label
+            if np.any(component & main_road):
+                continue
+            if float(main_distance[component].min()) < initial_road_gap_px:
+                merged_main_road |= component
+
+    main_road_neighborhood = _diamond_neighborhood(
+        merged_main_road,
+        road_gap_x_px,
+        road_gap_y_px,
+    )
     for label in range(1, count):
         component = labels == label
-        if np.any(component & main_road):
+        if np.any(component & merged_main_road):
             continue
-        if float(main_distance[component].min()) < road_gap_px:
+        if np.any(component & main_road_neighborhood):
             merged_main_road |= component
 
     processed[road_mask & ~merged_main_road] = CLASS_TO_ID["background"]
@@ -152,7 +207,8 @@ def postprocess_class_map(class_map: np.ndarray) -> np.ndarray:
 
     lane_center_id = CLASS_TO_ID["lane_center"]
     lane_center_mask = processed == lane_center_id
-    processed[lane_center_mask & (distance_to_road >= lane_gap_px)] = CLASS_TO_ID["background"]
+    lane_center_near_side_edge = (distance_to_left_edge < lane_gap_px) | (distance_to_right_edge < lane_gap_px)
+    processed[lane_center_mask & ((distance_to_road >= lane_gap_px) | lane_center_near_side_edge)] = CLASS_TO_ID["background"]
 
     stop_line_id = CLASS_TO_ID["stop_line"]
     stop_line_mask = processed == stop_line_id

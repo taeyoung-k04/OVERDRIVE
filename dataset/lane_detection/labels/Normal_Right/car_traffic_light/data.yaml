@@ -1,0 +1,4 @@
+nc: 2
+names: ['car', 'traffic_light']
+
+format: yolo26

@@ -9,11 +9,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from utils.perspective import (
-    add_perspective_args,
-    apply_perspective,
-    make_perspective_config,
-)
 from utils.postprocess import (
     CLASS_TO_ID,
     add_postprocess_args,
@@ -153,7 +148,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path("result/lane_detection/yolo_sem_class"))
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--device", default="cpu")
-    add_perspective_args(parser)
     add_postprocess_args(parser)
     return parser.parse_args()
 
@@ -173,7 +167,6 @@ def main() -> None:
         image = cv2.imread(str(source), cv2.IMREAD_COLOR)
         if image is None:
             raise RuntimeError(f"Could not read image: {source}")
-        perspective_config = make_perspective_config(args, image.shape[:2])
         results = model.predict(
             source=image,
             imgsz=args.imgsz,
@@ -184,8 +177,6 @@ def main() -> None:
         class_map = semantic_to_class_map(results[0].semantic_mask, image.shape[:2])
         if args.postprocess:
             class_map = postprocess_class_map(class_map)
-        image = apply_perspective(image, perspective_config)
-        class_map = apply_perspective(class_map, perspective_config, cv2.INTER_NEAREST)
         save_prediction(source, args.input, args.output, class_map, image)
         print(f"[{index:>3}/{len(sources)}] {source}")
 

@@ -15,11 +15,6 @@ from infer_sem_class import (
     make_class_overlay,
     semantic_to_class_map,
 )
-from utils.perspective import (
-    add_perspective_args,
-    apply_perspective,
-    make_perspective_config,
-)
 from utils.postprocess import (
     add_postprocess_args,
     postprocess_class_map,
@@ -32,7 +27,6 @@ def process_batch(
     imgsz: int,
     device: str,
     postprocess: bool,
-    args: argparse.Namespace,
 ) -> list[np.ndarray]:
     results = model.predict(
         source=frames,
@@ -44,12 +38,9 @@ def process_batch(
 
     overlays: list[np.ndarray] = []
     for frame, result in zip(frames, results):
-        perspective_config = make_perspective_config(args, frame.shape[:2])
         class_map = semantic_to_class_map(result.semantic_mask, frame.shape[:2])
         if postprocess:
             class_map = postprocess_class_map(class_map)
-        frame = apply_perspective(frame, perspective_config)
-        class_map = apply_perspective(class_map, perspective_config, cv2.INTER_NEAREST)
         overlays.append(make_class_overlay(frame, class_map))
     return overlays
 
@@ -76,17 +67,13 @@ def render_video(
     force_size = args.width > 0 and args.height > 0
     frame_width = args.width if force_size else source_width
     frame_height = args.height if force_size else source_height
-    output_width, output_height = frame_width, frame_height
-    perspective_config = make_perspective_config(args, (frame_height, frame_width))
-    if perspective_config is not None:
-        output_width, output_height = perspective_config.output_size
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(
         str(destination),
         cv2.VideoWriter_fourcc(*"mp4v"),
         output_fps,
-        (output_width, output_height),
+        (frame_width, frame_height),
     )
     if not writer.isOpened():
         capture.release()
@@ -117,14 +104,14 @@ def render_video(
         batch.append(frame)
         next_time += frame_step_time
         if len(batch) >= batch_size:
-            for overlay in process_batch(model, batch, imgsz, device, postprocess, args):
+            for overlay in process_batch(model, batch, imgsz, device, postprocess):
                 writer.write(overlay)
                 written += 1
             batch.clear()
             print(f"{source.name}: read {frame_index}/{total_frames}, wrote {written}", flush=True)
 
     if batch:
-        for overlay in process_batch(model, batch, imgsz, device, postprocess, args):
+        for overlay in process_batch(model, batch, imgsz, device, postprocess):
             writer.write(overlay)
             written += 1
 
@@ -150,7 +137,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--width", type=int, default=960, help="Frame width. 0 keeps the source size.")
     parser.add_argument("--height", type=int, default=540, help="Frame height. 0 keeps the source size.")
-    add_perspective_args(parser)
     add_postprocess_args(parser)
     return parser.parse_args()
 

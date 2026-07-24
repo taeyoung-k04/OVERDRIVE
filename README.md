@@ -24,7 +24,7 @@ python .\script\lane_detection\train_sem_class.py
 ```
 
 ```bash
-python -c "from ultralytics import YOLO; YOLO('runs/semantic/yolo_lane_sem_class/train_cpu_640_yolo26n_ade20k/weights/best.pt').export(format='onnx', imgsz=640)"
+python -c "from ultralytics import YOLO; YOLO('runs/semantic/yolo_lane_sem_class/train_cpu_640_yolo26n_8class/weights/best.pt').export(format='onnx', imgsz=640)"
 ```
 <br/>
 
@@ -35,16 +35,3 @@ python .\script\lane_detection\render_sem_class_video.py --backend onnx --postpr
 python .\script\lane_detection\realtime_sem_class_camera.py --backend onnx --postprocess --camera 1 --show-fps
 ```
 <br/>
-
-### 🔹 Run Inference with the Semantic Segmentation Model (with Perspective Warp)
-```bash
-python .\script\lane_detection\infer_sem_class.py --backend onnx --postprocess --perspective
-python .\script\lane_detection\render_sem_class_video.py --backend onnx --postprocess --perspective
-python .\script\lane_detection\realtime_sem_class_camera.py --backend onnx --postprocess --perspective --camera 1 --show-fps --show-pre-perspective
-```
-<br/>
-
-### 🔹 Lane Guidance (with Perspective Warp)
-```bash
-python .\script\lane_guidance.py --backend onnx --postprocess --perspective --camera 1 --show-fps
-```

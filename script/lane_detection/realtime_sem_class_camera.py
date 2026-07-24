@@ -18,11 +18,6 @@ from infer_sem_class import (
     make_class_overlay,
     semantic_to_class_map,
 )
-from utils.perspective import (
-    add_perspective_args,
-    apply_perspective,
-    make_perspective_config,
-)
 from utils.postprocess import (
     CLASS_TO_ID,
     add_postprocess_args,
@@ -47,12 +42,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera-fps", type=int, default=20, help="Requested camera FPS. 0 keeps camera default.")
     parser.add_argument("--flip", action="store_true", help="Horizontally flip camera frames before inference.")
     parser.add_argument("--show-fps", action="store_true", help="Draw measured FPS on the overlay.")
-    parser.add_argument(
-        "--show-pre-perspective",
-        action="store_true",
-        help="With --perspective, also display the preview before perspective warp.",
-    )
-    add_perspective_args(parser)
     add_postprocess_args(parser)
     return parser.parse_args()
 
@@ -138,43 +127,9 @@ def keep_lane_marking_classes(class_map):
     return np.where(np.isin(class_map, kept_ids), class_map, CLASS_TO_ID["background"]).astype(class_map.dtype)
 
 
-def keep_realtime_display_classes(class_map):
-    """Keep lane markings and object classes for the perspective preview."""
-    kept_ids = [
-        CLASS_TO_ID[class_name]
-        for class_name in (
-            "lane_left",
-            "lane_center",
-            "lane_right",
-            "stop_line",
-            "car",
-            "traffic_light",
-        )
-    ]
-    return np.where(
-        np.isin(class_map, kept_ids),
-        class_map,
-        CLASS_TO_ID["background"],
-    ).astype(class_map.dtype)
-
-
 def make_classmap_canvas(class_map, dtype):
     height, width = class_map.shape[:2]
     return np.zeros((height, width, 3), dtype=dtype)
-
-
-def resize_to_height(image, height: int):
-    if image.shape[0] == height:
-        return image
-    width = max(1, int(round(image.shape[1] * height / image.shape[0])))
-    return cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
-
-
-def join_pre_and_post_perspective(preview, perspective_preview):
-    target_height = perspective_preview.shape[0]
-    preview = resize_to_height(preview, target_height)
-    perspective_preview = resize_to_height(perspective_preview, target_height)
-    return np.hstack((preview, perspective_preview))
 
 
 def draw_fps(frame, fps: float) -> None:
@@ -235,7 +190,6 @@ def main() -> None:
 
     try:
         while True:
-            delay_right_edge = None
             ok, frame, frame_time = reader.read_with_timestamp()
             if not ok:
                 raise RuntimeError("Could not read a frame from the camera")
@@ -243,7 +197,6 @@ def main() -> None:
             if args.flip:
                 frame = cv2.flip(frame, 1)
             frame = normalize_frame_size(frame, args.width, args.height, True)
-            perspective_config = make_perspective_config(args, frame.shape[:2])
 
             results = model.predict(
                 source=frame,
@@ -258,22 +211,7 @@ def main() -> None:
             if args.postprocess:
                 class_map = postprocess_class_map(class_map)
 
-            if perspective_config is None:
-                preview = make_class_overlay(frame, class_map)
-            else:
-                pre_perspective_preview = (
-                    make_class_overlay(frame, class_map) if args.show_pre_perspective else None
-                )
-                class_map = keep_realtime_display_classes(class_map)
-                class_map = apply_perspective(class_map, perspective_config, cv2.INTER_NEAREST)
-                classmap_canvas = make_classmap_canvas(class_map, frame.dtype)
-                preview = make_class_overlay(classmap_canvas, class_map)
-                if pre_perspective_preview is not None:
-                    delay_right_edge = max(
-                        1,
-                        int(round(pre_perspective_preview.shape[1] * preview.shape[0] / pre_perspective_preview.shape[0])),
-                    )
-                    preview = join_pre_and_post_perspective(pre_perspective_preview, preview)
+            preview = make_class_overlay(frame, class_map)
 
             now = time.perf_counter()
             elapsed = now - previous_time
@@ -282,7 +220,7 @@ def main() -> None:
                 fps = 0.9 * fps + 0.1 * (1.0 / elapsed) if fps else 1.0 / elapsed
             if args.show_fps:
                 draw_fps(preview, fps)
-                draw_delay(preview, now - frame_time, delay_right_edge)
+                draw_delay(preview, now - frame_time)
 
             cv2.imshow(window_name, preview)
             key = cv2.waitKey(1) & 0xFF

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from tqdm import tqdm
 
 from utils.postprocess import (
     CLASS_TO_ID,
@@ -163,24 +164,32 @@ def main() -> None:
     if not sources:
         raise SystemExit(f"No images found below {args.input}")
 
-    for index, source in enumerate(sources, 1):
-        image = cv2.imread(str(source), cv2.IMREAD_COLOR)
-        if image is None:
-            raise RuntimeError(f"Could not read image: {source}")
-        results = model.predict(
-            source=image,
-            imgsz=args.imgsz,
-            device=args.device,
-            task="semantic",
-            verbose=False,
-        )
-        class_map = semantic_to_class_map(results[0].semantic_mask, image.shape[:2])
-        if args.postprocess:
-            class_map = postprocess_class_map(class_map)
-        save_prediction(source, args.input, args.output, class_map, image)
-        print(f"[{index:>3}/{len(sources)}] {source}")
+    folders: dict[Path, list[Path]] = {}
+    for source in sources:
+        folders.setdefault(source.parent, []).append(source)
 
-    print(f"Saved classified lane semantic results to {args.output}")
+    for folder, folder_sources in folders.items():
+        relative_folder = folder.relative_to(args.input)
+        description = str(relative_folder) if relative_folder.parts else args.input.name
+        progress = tqdm(folder_sources, desc=description, unit="image")
+        for source in progress:
+            image = cv2.imread(str(source), cv2.IMREAD_COLOR)
+            if image is None:
+                raise RuntimeError(f"Could not read image: {source}")
+            results = model.predict(
+                source=image,
+                imgsz=args.imgsz,
+                device=args.device,
+                task="semantic",
+                verbose=False,
+            )
+            class_map = semantic_to_class_map(results[0].semantic_mask, image.shape[:2])
+            if args.postprocess:
+                class_map = postprocess_class_map(class_map)
+            save_prediction(source, args.input, args.output, class_map, image)
+            progress.set_postfix_str(f"{source.name}")
+
+    tqdm.write(f"Saved classified lane semantic results to {args.output}")
 
 
 if __name__ == "__main__":

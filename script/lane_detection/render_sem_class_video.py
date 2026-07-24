@@ -8,6 +8,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
+from tqdm import tqdm
 
 from infer_sem_class import (
     DEFAULT_WEIGHTS,
@@ -85,11 +86,17 @@ def render_video(
     frame_step_time = 1.0 / output_fps
     batch: list[np.ndarray] = []
 
+    progress = tqdm(
+        total=total_frames if total_frames > 0 else None,
+        desc=source.stem,
+        unit="frame",
+    )
     while True:
         ok, frame = capture.read()
         if not ok:
             break
 
+        progress.update()
         time_seconds = frame_index / source_fps
         frame_index += 1
         if time_seconds + 1e-9 < next_time:
@@ -108,7 +115,7 @@ def render_video(
                 writer.write(overlay)
                 written += 1
             batch.clear()
-            print(f"{source.name}: read {frame_index}/{total_frames}, wrote {written}", flush=True)
+            progress.set_postfix(written=written)
 
     if batch:
         for overlay in process_batch(model, batch, imgsz, device, postprocess):
@@ -117,7 +124,8 @@ def render_video(
 
     capture.release()
     writer.release()
-    print(f"Saved {destination} ({written} frames @ {output_fps:g} FPS)", flush=True)
+    progress.set_postfix(written=written)
+    progress.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -131,7 +139,7 @@ def parse_args() -> argparse.Namespace:
         help="Path to .pt or .onnx weights. With --backend onnx, a .pt suffix is replaced with .onnx.",
     )
     parser.add_argument("--backend", choices=("auto", "pt", "onnx"), default="auto")
-    parser.add_argument("--fps", type=float, default=7.0)
+    parser.add_argument("--fps", type=float, default=8.0)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--device", default="cpu")

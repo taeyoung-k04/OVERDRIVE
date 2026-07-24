@@ -75,7 +75,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=360)
     parser.add_argument("--camera-fps", type=int, default=30)
     parser.add_argument("--no-force-size", action="store_true")
-    parser.add_argument("--buffered-camera", action="store_true")
     parser.add_argument("--flip", action="store_true")
     parser.add_argument("--show-fps", action="store_true")
     parser.add_argument("--preview", choices=("overlay", "debug"), default="debug")
@@ -431,7 +430,7 @@ def main() -> None:
     postprocess_config = load_postprocess_config(args.postprocess_config) if args.postprocess else None
 
     capture = open_camera(args.camera, args.width, args.height, args.camera_fps)
-    reader = None if args.buffered_camera else LatestFrameReader(capture)
+    reader = LatestFrameReader(capture)
 
     actual_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -539,7 +538,7 @@ def main() -> None:
 
     try:
         while True:
-            ok, frame = reader.read() if reader is not None else capture.read()
+            ok, frame = reader.read()
             if not ok or frame is None:
                 raise RuntimeError("Could not read a frame from the camera")
 
@@ -852,8 +851,7 @@ def main() -> None:
         # Stop the car before releasing the camera or closing the serial port.
         arduino.emergency_stop()
         arduino.close()
-        if reader is not None:
-            reader.stop()
+        reader.stop()
         capture.release()
         cv2.destroyAllWindows()
 

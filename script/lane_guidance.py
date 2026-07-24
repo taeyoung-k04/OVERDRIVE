@@ -105,7 +105,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--height", type=int, default=540)
     parser.add_argument("--camera-fps", type=int, default=20)
     parser.add_argument("--no-force-size", action="store_true")
-    parser.add_argument("--buffered-camera", action="store_true")
     parser.add_argument("--flip", action="store_true")
     parser.add_argument("--show-fps", action="store_true")
     add_perspective_args(parser)
@@ -299,7 +298,7 @@ def main() -> None:
     model = load_semantic_model(args.weights, args.backend)
 
     capture = open_camera(args.camera, args.width, args.height, args.camera_fps)
-    reader = None if args.buffered_camera else LatestFrameReader(capture)
+    reader = LatestFrameReader(capture)
     actual_width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
     actual_height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
     actual_fps = capture.get(cv2.CAP_PROP_FPS)
@@ -317,11 +316,7 @@ def main() -> None:
 
     try:
         while True:
-            if reader is not None:
-                ok, frame, frame_time = reader.read_with_timestamp()
-            else:
-                ok, frame = capture.read()
-                frame_time = time.perf_counter()
+            ok, frame, frame_time = reader.read_with_timestamp()
             if not ok:
                 raise RuntimeError("Could not read a frame from the camera")
 
@@ -365,8 +360,7 @@ def main() -> None:
             if key in (ord("q"), 27):
                 break
     finally:
-        if reader is not None:
-            reader.stop()
+        reader.stop()
         capture.release()
         cv2.destroyAllWindows()
 

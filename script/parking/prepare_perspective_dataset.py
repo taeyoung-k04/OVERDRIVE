@@ -13,15 +13,9 @@ from utils.perspective import (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Warp extracted parking frames into the map.svg coordinate system."
-    )
+    parser = argparse.ArgumentParser(description="Warp extracted parking frames into the map.svg coordinate system.")
     parser.add_argument("--input", type=Path, default=Path("dataset/parking/frames"))
-    parser.add_argument(
-        "--output",
-        type=Path,
-        default=Path("dataset/parking/perspective"),
-    )
+    parser.add_argument("--output", type=Path, default=Path("dataset/parking/perspective"))
     return parser.parse_args()
 
 

@@ -19,6 +19,11 @@ pip install python-dotenv ultralytics
 
 ### 🔸 [Not Required] Train the Semantic Segmentation Model
 ```bash
+New-Item -ItemType Directory -Force weights
+curl.exe -L "https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo26n-sem-ade20k.pt" -o "weights/yolo26n-sem-ade20k.pt"
+```
+
+```bash
 python .\script\lane_detection\prepare_sem_class_dataset.py --clean
 python .\script\lane_detection\train_sem_class.py
 ```

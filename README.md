@@ -29,7 +29,13 @@ python .\script\lane_detection\train_sem_class.py
 ```
 
 ```bash
+python .\script\parking\prepare_sem_class_dataset.py --clean
+python .\script\parking\train_sem_class.py
+```
+
+```bash
 python -c "from ultralytics import YOLO; YOLO('runs/semantic/yolo_lane_sem_class/train_cpu_640_yolo26n_8class/weights/best.pt').export(format='onnx', imgsz=640)"
+python -c "from ultralytics import YOLO; YOLO('runs/semantic/yolo_parking_sem_class/train_cpu_640_yolo26n_5class/weights/best.pt').export(format='onnx', imgsz=640)"
 ```
 <br/>
 
@@ -38,5 +44,9 @@ python -c "from ultralytics import YOLO; YOLO('runs/semantic/yolo_lane_sem_class
 python .\script\lane_detection\infer_sem_class.py --backend onnx --postprocess
 python .\script\lane_detection\render_sem_class_video.py --backend onnx --postprocess
 python .\script\lane_detection\realtime_sem_class_camera.py --backend onnx --postprocess --camera 1 --show-fps
+```
+
+```bash
+python .\script\parking\infer_sem_class.py --backend onnx
 ```
 <br/>

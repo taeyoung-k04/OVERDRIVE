@@ -1,98 +1,133 @@
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass
 
 import cv2
 import numpy as np
 
 
-DEFAULT_BEV_SRC_POINTS = np.array(
-    [
-        [0.4052, 0.4731],
-        [0.6391, 0.4731],
-        [0.7896, 0.9046],
-        [0.2427, 0.9046],
-    ],
-    dtype=np.float32,
-)
-DEFAULT_BEV_OUTPUT_WIDTH_RATIO = 0.50
-DEFAULT_BEV_OUTPUT_HEIGHT_TO_WIDTH = 0.75
-DEFAULT_BEV_DST_LEFT_MARGIN_RATIO = 0.35
-DEFAULT_BEV_DST_RIGHT_MARGIN_RATIO = 0.35
-DEFAULT_BEV_DST_TOP_MARGIN_RATIO = 0.10
-DEFAULT_BEV_DST_BOTTOM_MARGIN_RATIO = 0.06
+CALIBRATION_IMAGE_SIZE = (1280, 720)
+MAP_OUTPUT_SIZE = (1462, 1949)
+OUTPUT_CROP_TOP_RATIO = 0.10
+OUTPUT_CROP_LEFT_RATIO = 0.10
+OUTPUT_CROP_RIGHT_RATIO = 0.10
+OUTPUT_CROP_RIGHT_EXTRA_PIXELS = 125
 
-# Keep the existing 640x480 BEV unchanged at the bottom center, while
-# extending the canvas to show more of the same perspective transform.
-DEFAULT_BEV_CANVAS_WIDTH = 840
-DEFAULT_BEV_CANVAS_HEIGHT = 840
+# Placement of Right_Front_/frame_000000s.jpg in map.svg.
+SVG_FRAME_ORIGIN = np.array([471.5, 1234.22], dtype=np.float64)
+SVG_FRAME_SIZE = np.array([327.0, 184.0], dtype=np.float64)
+SVG_FRAME_ROTATION_DEGREES = -1.00286
+
+# The first two red markers are already coincident in map.svg. For every
+# other color, the first point is on the frame and the second is on the map.
+SVG_FRAME_POINTS = np.array(
+    [
+        [523.0, 1353.0],  # red, left
+        [758.0, 1353.0],  # red, right
+        [719.0, 1325.0],  # orange
+        [572.0, 1314.0],  # yellow
+        [508.0, 1312.0],  # olive
+        [592.0, 1298.0],  # green
+        [547.0, 1297.0],  # light green
+        [698.0, 1310.0],  # mint
+        [686.0, 1301.0],  # cyan
+        [678.0, 1295.0],  # blue
+        [603.0, 1290.0],  # indigo
+        [568.0, 1289.0],  # purple
+    ],
+    dtype=np.float64,
+)
+
+MAP_POINTS = np.array(
+    [
+        [523.0, 1353.0],  # red, left
+        [758.0, 1353.0],  # red, right
+        [760.0, 1228.0],  # orange
+        [526.0, 1167.0],  # yellow
+        [417.0, 1167.0],  # olive
+        [526.0, 979.0],   # green
+        [417.0, 979.0],   # light green
+        [760.0, 1106.0],  # mint
+        [760.0, 984.0],   # cyan
+        [760.0, 862.0],   # blue
+        [526.0, 790.0],   # indigo
+        [417.0, 790.0],   # purple
+    ],
+    dtype=np.float64,
+)
 
 
 @dataclass(frozen=True)
-class PerspectiveConfig:
-    src_points: np.ndarray
-    dst_points: np.ndarray
+class NewPerspectiveConfig:
+    transform: np.ndarray
     output_size: tuple[int, int]
 
 
-def _scale_normalized_points(points: np.ndarray, width: int, height: int) -> np.ndarray:
-    scaled = points.copy()
-    scaled[:, 0] *= width - 1
-    scaled[:, 1] *= height - 1
-    return scaled.astype(np.float32)
-
-
-def _make_bev_destination(width: int) -> tuple[np.ndarray, tuple[int, int]]:
-    bev_width = max(1, int(round(width * DEFAULT_BEV_OUTPUT_WIDTH_RATIO)))
-    bev_height = max(1, int(round(bev_width * DEFAULT_BEV_OUTPUT_HEIGHT_TO_WIDTH)))
-    output_width = max(bev_width, DEFAULT_BEV_CANVAS_WIDTH)
-    output_height = max(bev_height, DEFAULT_BEV_CANVAS_HEIGHT)
-
-    offset_x = (output_width - bev_width) * 0.5
-    offset_y = output_height - bev_height
-    left = offset_x + bev_width * DEFAULT_BEV_DST_LEFT_MARGIN_RATIO
-    right = offset_x + bev_width * (1.0 - DEFAULT_BEV_DST_RIGHT_MARGIN_RATIO)
-    top = offset_y + bev_height * DEFAULT_BEV_DST_TOP_MARGIN_RATIO
-    bottom = offset_y + bev_height * (1.0 - DEFAULT_BEV_DST_BOTTOM_MARGIN_RATIO)
-
-    dst_points = np.array(
+def _svg_points_to_image_points(points: np.ndarray) -> np.ndarray:
+    inverse_angle = np.deg2rad(-SVG_FRAME_ROTATION_DEGREES)
+    inverse_rotation = np.array(
         [
-            [left, top],
-            [right, top],
-            [right, bottom],
-            [left, bottom],
+            [np.cos(inverse_angle), -np.sin(inverse_angle)],
+            [np.sin(inverse_angle), np.cos(inverse_angle)],
         ],
-        dtype=np.float32,
+        dtype=np.float64,
     )
-    return dst_points, (output_width, output_height)
+    local_points = (points - SVG_FRAME_ORIGIN) @ inverse_rotation.T
+    image_scale = np.array(CALIBRATION_IMAGE_SIZE, dtype=np.float64) / SVG_FRAME_SIZE
+    return local_points * image_scale
 
 
-def add_perspective_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--perspective",
-        action="store_true",
-        help="Apply bird's-eye-view perspective warp after postprocessing.",
-    )
+CALIBRATION_FRAME_POINTS = _svg_points_to_image_points(SVG_FRAME_POINTS)
 
 
-def make_perspective_config(args: argparse.Namespace, shape: tuple[int, int]) -> PerspectiveConfig | None:
-    if not getattr(args, "perspective", False):
-        return None
+def make_new_perspective_config(image_shape: tuple[int, ...]) -> NewPerspectiveConfig:
+    height, width = image_shape[:2]
+    calibration_width, calibration_height = CALIBRATION_IMAGE_SIZE
+    frame_points = CALIBRATION_FRAME_POINTS.copy()
+    frame_points[:, 0] *= width / calibration_width
+    frame_points[:, 1] *= height / calibration_height
 
-    height, width = shape[:2]
-    src_points = _scale_normalized_points(DEFAULT_BEV_SRC_POINTS, width, height)
-    dst_points, output_size = _make_bev_destination(width)
-    return PerspectiveConfig(src_points=src_points, dst_points=dst_points, output_size=output_size)
+    transform, _ = cv2.findHomography(frame_points, MAP_POINTS, method=0)
+    if transform is None:
+        raise RuntimeError("Could not calculate the map-to-frame homography")
+
+    return NewPerspectiveConfig(transform=transform, output_size=MAP_OUTPUT_SIZE)
 
 
-def apply_perspective(
+def apply_new_perspective(
     image: np.ndarray,
-    config: PerspectiveConfig | None,
+    config: NewPerspectiveConfig,
     interpolation: int = cv2.INTER_LINEAR,
 ) -> np.ndarray:
-    if config is None:
-        return image
+    warped = cv2.warpPerspective(
+        image,
+        config.transform,
+        config.output_size,
+        flags=interpolation,
+    )
+    valid_source = np.full(image.shape[:2], 255, dtype=np.uint8)
+    valid_output = cv2.warpPerspective(
+        valid_source,
+        config.transform,
+        config.output_size,
+        flags=cv2.INTER_NEAREST,
+    )
+    valid_rows = np.flatnonzero(np.any(valid_output != 0, axis=1))
+    if valid_rows.size == 0:
+        raise RuntimeError("Perspective result contains no valid image area")
 
-    transform = cv2.getPerspectiveTransform(config.src_points, config.dst_points)
-    return cv2.warpPerspective(image, transform, config.output_size, flags=interpolation)
+    content_bottom = int(valid_rows[-1]) + 1
+    top = int(round(content_bottom * OUTPUT_CROP_TOP_RATIO))
+    left = int(round(warped.shape[1] * OUTPUT_CROP_LEFT_RATIO))
+    right = warped.shape[1] - int(
+        round(warped.shape[1] * OUTPUT_CROP_RIGHT_RATIO)
+    ) - OUTPUT_CROP_RIGHT_EXTRA_PIXELS
+    return warped[top:content_bottom, left:right]
+
+
+def calibration_errors(config: NewPerspectiveConfig) -> np.ndarray:
+    projected = cv2.perspectiveTransform(
+        CALIBRATION_FRAME_POINTS.astype(np.float32)[None, :, :],
+        config.transform,
+    )[0]
+    return np.linalg.norm(projected - MAP_POINTS, axis=1)

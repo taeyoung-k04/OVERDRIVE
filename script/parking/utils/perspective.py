@@ -23,6 +23,11 @@ DEFAULT_BEV_DST_RIGHT_MARGIN_RATIO = 0.35
 DEFAULT_BEV_DST_TOP_MARGIN_RATIO = 0.10
 DEFAULT_BEV_DST_BOTTOM_MARGIN_RATIO = 0.06
 
+# Keep the existing 640x480 BEV unchanged at the bottom center, while
+# extending the canvas to show more of the same perspective transform.
+DEFAULT_BEV_CANVAS_WIDTH = 840
+DEFAULT_BEV_CANVAS_HEIGHT = 840
+
 
 @dataclass(frozen=True)
 class PerspectiveConfig:
@@ -39,12 +44,18 @@ def _scale_normalized_points(points: np.ndarray, width: int, height: int) -> np.
 
 
 def _make_bev_destination(width: int) -> tuple[np.ndarray, tuple[int, int]]:
-    output_width = max(1, int(round(width * DEFAULT_BEV_OUTPUT_WIDTH_RATIO)))
-    output_height = max(1, int(round(output_width * DEFAULT_BEV_OUTPUT_HEIGHT_TO_WIDTH)))
-    left = output_width * DEFAULT_BEV_DST_LEFT_MARGIN_RATIO
-    right = output_width * (1.0 - DEFAULT_BEV_DST_RIGHT_MARGIN_RATIO)
-    top = output_height * DEFAULT_BEV_DST_TOP_MARGIN_RATIO
-    bottom = output_height * (1.0 - DEFAULT_BEV_DST_BOTTOM_MARGIN_RATIO)
+    bev_width = max(1, int(round(width * DEFAULT_BEV_OUTPUT_WIDTH_RATIO)))
+    bev_height = max(1, int(round(bev_width * DEFAULT_BEV_OUTPUT_HEIGHT_TO_WIDTH)))
+    output_width = max(bev_width, DEFAULT_BEV_CANVAS_WIDTH)
+    output_height = max(bev_height, DEFAULT_BEV_CANVAS_HEIGHT)
+
+    offset_x = (output_width - bev_width) * 0.5
+    offset_y = output_height - bev_height
+    left = offset_x + bev_width * DEFAULT_BEV_DST_LEFT_MARGIN_RATIO
+    right = offset_x + bev_width * (1.0 - DEFAULT_BEV_DST_RIGHT_MARGIN_RATIO)
+    top = offset_y + bev_height * DEFAULT_BEV_DST_TOP_MARGIN_RATIO
+    bottom = offset_y + bev_height * (1.0 - DEFAULT_BEV_DST_BOTTOM_MARGIN_RATIO)
+
     dst_points = np.array(
         [
             [left, top],

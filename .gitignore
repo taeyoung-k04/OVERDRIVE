@@ -3,6 +3,8 @@
 __pycache__/
 
 dataset/lane_detection/yolo_*
+dataset/parking/perspective
+
 result/lane_detection/
 
 runs/**/weights/*.pt

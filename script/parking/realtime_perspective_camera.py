@@ -202,7 +202,7 @@ def main() -> None:
             draw_reference_status(overlay, reference_name, alpha)
             bev = apply_new_perspective(frame, config)
             bev_preview = resize_to_height(bev, frame.shape[0])
-            draw_label(bev_preview, f"Live BEV | full output {bev.shape[1]}x{bev.shape[0]}")
+            draw_label(bev_preview, f"Live BEV")
             preview = cv2.hconcat((overlay, bev_preview))
 
             cv2.imshow(window_name, preview)

@@ -58,6 +58,9 @@ LAYOUT_POINTS = np.array(
     dtype=np.float32,
 )
 
+CROP_TOP = 463
+CROP_BOTTOM = 468
+CROP_RIGHT = 248
 
 @dataclass(frozen=True)
 class NewPerspectiveConfig:
@@ -114,7 +117,7 @@ def apply_new_perspective(
     if config is None:
         config = make_new_perspective_config(image.shape)
 
-    return cv2.warpPerspective(
+    warped = cv2.warpPerspective(
         image,
         config.transform,
         config.output_size,
@@ -122,6 +125,16 @@ def apply_new_perspective(
         borderMode=cv2.BORDER_CONSTANT,
         borderValue=border_value,
     )
+    if (
+        warped.shape[0] <= CROP_TOP + CROP_BOTTOM
+        or warped.shape[1] <= CROP_RIGHT
+    ):
+        raise ValueError(
+            f"Perspective output {warped.shape[1]}x{warped.shape[0]} is too "
+            f"small for top={CROP_TOP}, bottom={CROP_BOTTOM}, "
+            f"right={CROP_RIGHT} cropping"
+        )
+    return warped[CROP_TOP:-CROP_BOTTOM, :-CROP_RIGHT]
 
 
 def transform_points(

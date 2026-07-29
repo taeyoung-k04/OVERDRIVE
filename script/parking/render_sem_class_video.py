@@ -16,7 +16,10 @@ from infer_sem_class import (
     make_overlay,
     semantic_to_class_map,
 )
-from utils.filter_cars import filter_cars_in_parking_region
+from utils.filter_cars import (
+    filter_cars_in_parking_region,
+    remove_car_detections,
+)
 from utils.lane_detect import (
     ParkingDotLineDetector,
     ParkingLineDetector,
@@ -25,11 +28,12 @@ from utils.lane_detect import (
     draw_line,
     draw_parking_lines,
 )
+from utils.phase_control import PhaseController
 
 
-def draw_phase(image: np.ndarray) -> None:
+def draw_phase(image: np.ndarray, phase: int) -> None:
     """Draw the current parking phase in the upper-right corner."""
-    text = "PHASE 0"
+    text = f"PHASE {phase}"
     text_size, _ = cv2.getTextSize(
         text,
         cv2.FONT_HERSHEY_SIMPLEX,
@@ -110,6 +114,7 @@ def process_batch(
     line_detector: ReferenceLineDetector,
     parking_dot_detector: ParkingDotLineDetector,
     parking_line_detector: ParkingLineDetector,
+    phase_controller: PhaseController,
 ) -> list[np.ndarray]:
     results = model.predict(
         source=frames,
@@ -125,54 +130,66 @@ def process_batch(
             frame.shape[:2],
         )
         reference_line = line_detector.detect(class_map)
-        parking_dot_line = parking_dot_detector.detect(class_map)
-        parking_lines = parking_line_detector.detect(
-            class_map,
-            excluded_points=parking_dot_line.rejected_points,
-        )
-        class_map = filter_cars_in_parking_region(
-            class_map,
-            parking_dot_line,
-            parking_lines,
-        )
+        parking_dot_line = None
+        parking_lines = None
+        if phase_controller.phase == 0:
+            parking_dot_line = parking_dot_detector.detect(class_map)
+            parking_lines = parking_line_detector.detect(
+                class_map,
+                excluded_points=parking_dot_line.rejected_points,
+            )
+            class_map = filter_cars_in_parking_region(
+                class_map,
+                parking_dot_line,
+                parking_lines,
+            )
+            phase_controller.update(
+                class_map,
+                parking_lines,
+                parking_dot_line,
+            )
+        if phase_controller.phase == 1:
+            class_map = remove_car_detections(class_map)
         overlay = make_overlay(frame, class_map)
-        draw_parking_lines(
-            overlay,
-            parking_lines,
-            color=(0, 140, 255),
-            thickness=3,
-        )
+        if phase_controller.phase == 0:
+            draw_parking_lines(
+                overlay,
+                parking_lines,
+                color=(0, 140, 255),
+                thickness=3,
+            )
         draw_line(
             overlay,
             reference_line,
             color=(0, 255, 0),
             thickness=3,
         )
-        draw_line(
-            overlay,
-            parking_dot_line,
-            color=(0, 255, 255),
-            thickness=3,
-        )
-        draw_line_points(
-            overlay,
-            parking_dot_line,
-            color=(0, 200, 255),
-            radius=6,
-        )
-        draw_parking_dot_status(
-            overlay,
-            valid=parking_dot_line.valid,
-            confidence=parking_dot_line.confidence,
-            reason=parking_dot_line.reason,
-        )
+        if phase_controller.phase == 0:
+            draw_line(
+                overlay,
+                parking_dot_line,
+                color=(0, 255, 255),
+                thickness=3,
+            )
+            draw_line_points(
+                overlay,
+                parking_dot_line,
+                color=(0, 200, 255),
+                radius=6,
+            )
+            draw_parking_dot_status(
+                overlay,
+                valid=parking_dot_line.valid,
+                confidence=parking_dot_line.confidence,
+                reason=parking_dot_line.reason,
+            )
         draw_reference_status(
             overlay,
             valid=reference_line.valid,
             confidence=reference_line.confidence,
             reason=reference_line.reason,
         )
-        draw_phase(overlay)
+        draw_phase(overlay, phase_controller.phase)
         overlays.append(overlay)
     return overlays
 
@@ -219,6 +236,7 @@ def render_video(
     line_detector = ReferenceLineDetector()
     parking_dot_detector = ParkingDotLineDetector()
     parking_line_detector = ParkingLineDetector()
+    phase_controller = PhaseController()
     progress = tqdm(
         total=total_frames if total_frames > 0 else None,
         desc=source.stem,
@@ -255,6 +273,7 @@ def render_video(
                     line_detector,
                     parking_dot_detector,
                     parking_line_detector,
+                    phase_controller,
                 ):
                     writer.write(overlay)
                     written += 1
@@ -270,6 +289,7 @@ def render_video(
                 line_detector,
                 parking_dot_detector,
                 parking_line_detector,
+                phase_controller,
             ):
                 writer.write(overlay)
                 written += 1
@@ -317,9 +337,12 @@ def main() -> None:
         args.batch = 1
 
     model = load_semantic_model(args.weights, args.backend)
-    sources = sorted(args.input.glob("*.mp4"))
+    # Temporary: render only parking videos whose filename starts with Right.
+    sources = sorted(args.input.glob("Right*.mp4"))
     if not sources:
-        raise SystemExit(f"No mp4 files found in {args.input}")
+        raise SystemExit(
+            f"No mp4 files starting with 'Right' found in {args.input}"
+        )
 
     for source in sources:
         render_video(

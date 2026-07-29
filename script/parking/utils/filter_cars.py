@@ -102,4 +102,19 @@ def filter_cars_in_parking_region(
     return filtered
 
 
-__all__ = ["filter_cars_in_parking_region"]
+def remove_car_detections(
+    class_map: np.ndarray,
+    *,
+    car_class_id: int = CLASS_TO_ID["car"],
+) -> np.ndarray:
+    """Return a class map with every car pixel changed to background."""
+    ReferenceLineDetector._validate_class_map(class_map)
+    filtered = class_map.copy()
+    filtered[filtered == int(car_class_id)] = CLASS_TO_ID["background"]
+    return filtered
+
+
+__all__ = [
+    "filter_cars_in_parking_region",
+    "remove_car_detections",
+]

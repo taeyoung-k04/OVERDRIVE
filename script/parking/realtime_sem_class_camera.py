@@ -17,7 +17,10 @@ from infer_sem_class import (
     make_overlay,
     semantic_to_class_map,
 )
-from utils.filter_cars import filter_cars_in_parking_region
+from utils.filter_cars import (
+    filter_cars_in_parking_region,
+    remove_car_detections,
+)
 from utils.lane_detect import (
     ParkingDotLineDetector,
     ParkingLineDetector,
@@ -27,6 +30,7 @@ from utils.lane_detect import (
     draw_line,
     draw_parking_lines,
 )
+from utils.phase_control import PhaseController
 
 
 def parse_args() -> argparse.Namespace:
@@ -133,9 +137,9 @@ def draw_performance(frame, fps: float, delay: float) -> None:
     )
 
 
-def draw_phase(frame) -> None:
+def draw_phase(frame, phase: int) -> None:
     """Draw the current parking phase in the upper-right corner."""
-    text = "PHASE 0"
+    text = f"PHASE {phase}"
     text_size, _ = cv2.getTextSize(
         text,
         cv2.FONT_HERSHEY_SIMPLEX,
@@ -230,6 +234,7 @@ def main() -> None:
     line_detector = ReferenceLineDetector()
     parking_dot_detector = ParkingDotLineDetector()
     parking_line_detector = ParkingLineDetector()
+    phase_controller = PhaseController()
 
     try:
         while True:
@@ -254,42 +259,54 @@ def main() -> None:
                 frame.shape[:2],
             )
             reference_line = line_detector.detect(class_map)
-            parking_dot_line = parking_dot_detector.detect(class_map)
-            parking_lines = parking_line_detector.detect(
-                class_map,
-                excluded_points=parking_dot_line.rejected_points,
-            )
-            class_map = filter_cars_in_parking_region(
-                class_map,
-                parking_dot_line,
-                parking_lines,
-            )
+            parking_dot_line = None
+            parking_lines = None
+            if phase_controller.phase == 0:
+                parking_dot_line = parking_dot_detector.detect(class_map)
+                parking_lines = parking_line_detector.detect(
+                    class_map,
+                    excluded_points=parking_dot_line.rejected_points,
+                )
+                class_map = filter_cars_in_parking_region(
+                    class_map,
+                    parking_dot_line,
+                    parking_lines,
+                )
+                phase_controller.update(
+                    class_map,
+                    parking_lines,
+                    parking_dot_line,
+                )
+            if phase_controller.phase == 1:
+                class_map = remove_car_detections(class_map)
             preview = make_overlay(frame, class_map)
-            draw_parking_lines(
-                preview,
-                parking_lines,
-                color=(0, 140, 255),
-                thickness=3,
-            )
+            if phase_controller.phase == 0:
+                draw_parking_lines(
+                    preview,
+                    parking_lines,
+                    color=(0, 140, 255),
+                    thickness=3,
+                )
             draw_line(
                 preview,
                 reference_line,
                 color=(0, 255, 0),
                 thickness=3,
             )
-            draw_line(
-                preview,
-                parking_dot_line,
-                color=(0, 255, 255),
-                thickness=3,
-            )
-            draw_line_points(
-                preview,
-                parking_dot_line,
-                color=(0, 200, 255),
-                radius=6,
-            )
-            draw_parking_dot_status(preview, parking_dot_line)
+            if phase_controller.phase == 0:
+                draw_line(
+                    preview,
+                    parking_dot_line,
+                    color=(0, 255, 255),
+                    thickness=3,
+                )
+                draw_line_points(
+                    preview,
+                    parking_dot_line,
+                    color=(0, 200, 255),
+                    radius=6,
+                )
+                draw_parking_dot_status(preview, parking_dot_line)
             draw_reference_status(preview, reference_line)
 
             now = time.perf_counter()
@@ -304,7 +321,7 @@ def main() -> None:
                 )
             if args.show_fps:
                 draw_performance(preview, measured_fps, now - frame_time)
-            draw_phase(preview)
+            draw_phase(preview, phase_controller.phase)
 
             cv2.imshow(window_name, preview)
             if cv2.waitKey(1) & 0xFF in (ord("q"), 27):

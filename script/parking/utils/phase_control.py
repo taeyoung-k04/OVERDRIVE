@@ -20,9 +20,9 @@ class PhaseController:
 
     phase: int = 0
     horizontal_tolerance_deg: float = 1.0
-    phase_3_reverse_seconds: float = 0.5
+    phase_3_reverse_seconds: float = 1.0
     phase_4_stop_seconds: float = 4.0
-    phase_5_forward_seconds: float = 0.5
+    phase_5_forward_seconds: float = 1.0
     phase_started_at: Optional[float] = None
     previous_reference_direction_y: Optional[float] = None
 
@@ -128,7 +128,7 @@ class PhaseController:
             bottom_x = reference_line.x_at(float(height - 1))
             if (
                 bottom_x is not None
-                and width * 0.45 <= bottom_x <= width - 1
+                and width * 0.40 <= bottom_x <= width - 1
             ):
                 self.phase = 2
                 self.phase_started_at = current_time

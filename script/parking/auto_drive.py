@@ -141,7 +141,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--speed-min", type=int, default=100)
     parser.add_argument("--constant-speed", type=int, default=140)
 
-    parser.add_argument("--arduino-port", default="COM7")
+    parser.add_argument("--arduino-port", default="COM8")
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--serial-timeout", type=float, default=0.10)
     parser.add_argument("--arduino-reset-wait", type=float, default=1.8)
@@ -411,7 +411,7 @@ def phase_2_max_right_output(
 
 
 def phase_3_output(steering_centered: bool) -> ControlOutput:
-    """Reverse straight throughout the 0.5-second phase."""
+    """Reverse straight throughout the 1-second phase."""
     return ControlOutput(
         valid=True,
         steering=0.0,
@@ -420,7 +420,7 @@ def phase_3_output(steering_centered: bool) -> ControlOutput:
         confidence=1.0,
         lost_frames=0,
         reason=(
-            "phase 3: reversing straight for 0.5 seconds"
+            "phase 3: reversing straight for 1 second"
             if steering_centered
             else "phase 3: waiting for centered steering"
         ),
@@ -428,7 +428,7 @@ def phase_3_output(steering_centered: bool) -> ControlOutput:
 
 
 def phase_5_output(steering_centered: bool) -> ControlOutput:
-    """Drive straight throughout the 0.5-second phase."""
+    """Drive straight throughout the 1-second phase."""
     return ControlOutput(
         valid=True,
         steering=0.0,
@@ -437,7 +437,7 @@ def phase_5_output(steering_centered: bool) -> ControlOutput:
         confidence=1.0,
         lost_frames=0,
         reason=(
-            "phase 5: driving straight for 0.5 seconds"
+            "phase 5: driving straight for 1 second"
             if steering_centered
             else "phase 5: waiting for centered steering"
         ),
@@ -744,8 +744,8 @@ def main() -> None:
                     phase_6_steering_command,
                     args.steering_command_scale,
                 )
-            elif phase_controller.phase == 7 and out_follow_line is not None:
-                if out_follow_line.valid:
+            elif phase_controller.phase == 7:
+                if out_follow_line is not None and out_follow_line.valid:
                     observation = line_to_lane_curve(
                         out_follow_line,
                         frame.shape[0],
@@ -755,6 +755,7 @@ def main() -> None:
                         frame_shape=frame.shape[:2],
                         offset_ratio=0.0,
                     )
+                    control.speed = KEYBOARD_DRIVE_SPEED
                     phase_7_steering_command = control.steering_command
                     phase_7_last_step_time = time.perf_counter()
                 else:

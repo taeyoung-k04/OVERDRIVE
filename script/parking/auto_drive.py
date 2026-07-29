@@ -147,6 +147,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--arduino-reset-wait", type=float, default=1.8)
     parser.add_argument("--command-rate", type=float, default=20.0)
     parser.add_argument("--steering-command-scale", type=int, default=1000)
+    parser.add_argument("--telemetry-stale-seconds", type=float, default=0.8)
+    parser.add_argument(
+        "--steering-center-tolerance",
+        type=int,
+        default=50,
+        help="Maximum absolute Arduino actual_command considered centered.",
+    )
     return parser.parse_args()
 
 
@@ -168,6 +175,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--far-y-ratio must be smaller than --near-y-ratio")
     if args.command_rate <= 0:
         raise SystemExit("--command-rate must be positive")
+    if args.telemetry_stale_seconds <= 0:
+        raise SystemExit("--telemetry-stale-seconds must be positive")
+    if args.steering_center_tolerance < 0:
+        raise SystemExit("--steering-center-tolerance must be non-negative")
     for name in (
         "speed_straight",
         "speed_turn",
@@ -399,33 +410,41 @@ def phase_2_max_right_output(
     )
 
 
-def phase_3_output(
-    phase_started_at: float | None,
-    reverse_seconds: float,
-) -> ControlOutput:
-    """Reverse straight briefly, then remain fully stopped."""
-    elapsed = (
-        math.inf
-        if phase_started_at is None
-        else max(0.0, time.perf_counter() - phase_started_at)
-    )
-    reversing = elapsed < reverse_seconds
+def phase_3_output(steering_centered: bool) -> ControlOutput:
+    """Reverse straight throughout the 0.5-second phase."""
     return ControlOutput(
         valid=True,
         steering=0.0,
         steering_command=0,
-        speed=-KEYBOARD_DRIVE_SPEED if reversing else 0,
+        speed=-KEYBOARD_DRIVE_SPEED if steering_centered else 0,
         confidence=1.0,
         lost_frames=0,
         reason=(
             "phase 3: reversing straight for 0.5 seconds"
-            if reversing
-            else "phase 3: stopped for 4 seconds"
+            if steering_centered
+            else "phase 3: waiting for centered steering"
         ),
     )
 
 
-def phase_4_max_right_output(
+def phase_5_output(steering_centered: bool) -> ControlOutput:
+    """Drive straight throughout the 0.5-second phase."""
+    return ControlOutput(
+        valid=True,
+        steering=0.0,
+        steering_command=0,
+        speed=KEYBOARD_DRIVE_SPEED if steering_centered else 0,
+        confidence=1.0,
+        lost_frames=0,
+        reason=(
+            "phase 5: driving straight for 0.5 seconds"
+            if steering_centered
+            else "phase 5: waiting for centered steering"
+        ),
+    )
+
+
+def phase_6_max_right_output(
     steering_command: int,
     steering_scale: int,
 ) -> ControlOutput:
@@ -446,10 +465,28 @@ def phase_4_max_right_output(
         confidence=1.0,
         lost_frames=0,
         reason=(
-            "phase 4: driving forward at maximum right steering"
+            "phase 6: driving forward at maximum right steering"
             if at_max_right
-            else "phase 4: moving steering to maximum right"
+            else "phase 6: moving steering to maximum right"
         ),
+    )
+
+
+def phase_7_out_lost_output(
+    steering_command: int,
+    steering_scale: int,
+) -> ControlOutput:
+    """Keep driving while returning steering toward zero after out is lost."""
+    scale = max(1, int(steering_scale))
+    steering_command = int(np.clip(steering_command, -scale, scale))
+    return ControlOutput(
+        valid=False,
+        steering=steering_command / scale,
+        steering_command=steering_command,
+        speed=KEYBOARD_DRIVE_SPEED,
+        confidence=0.0,
+        lost_frames=1,
+        reason="phase 7: out lost, straightening while driving",
     )
 
 
@@ -540,8 +577,10 @@ def main() -> None:
     phase_1_last_step_time: float | None = None
     phase_2_steering_command = 0
     phase_2_last_step_time: float | None = None
-    phase_4_steering_command = 0
-    phase_4_last_step_time: float | None = None
+    phase_6_steering_command = 0
+    phase_6_last_step_time: float | None = None
+    phase_7_steering_command = 0
+    phase_7_last_step_time: float | None = None
     previous_time = time.perf_counter()
     fps = 0.0
     print(
@@ -577,6 +616,14 @@ def main() -> None:
                 result.semantic_mask,
                 frame.shape[:2],
             )
+            telemetry = arduino.telemetry_snapshot(
+                args.telemetry_stale_seconds
+            )
+            steering_centered = (
+                telemetry is not None
+                and abs(int(telemetry.actual_command))
+                <= args.steering_center_tolerance
+            )
 
             reference_line = reference_detector.detect(class_map)
             parking_dot_line: Line | None = None
@@ -608,15 +655,16 @@ def main() -> None:
                     )
             elif (
                 driving_enabled
-                and phase_controller.phase in (1, 2, 3, 4)
+                and phase_controller.phase in (1, 2, 3, 4, 5, 6)
             ):
                 phase_controller.update(
                     class_map,
                     reference_line=reference_line,
+                    steering_centered=steering_centered,
                     now=time.perf_counter(),
                 )
 
-            if phase_controller.phase == 5:
+            if phase_controller.phase == 7:
                 out_follow_line = detect_out_follow_line(class_map)
 
             if phase_controller.phase >= 1:
@@ -672,39 +720,68 @@ def main() -> None:
                     args.steering_command_scale,
                 )
             elif phase_controller.phase == 3:
-                control = phase_3_output(
-                    phase_controller.phase_started_at,
-                    phase_controller.phase_3_reverse_seconds,
-                )
+                control = phase_3_output(steering_centered)
             elif phase_controller.phase == 4:
+                control = stopped_output("phase 4: stopped for 4 seconds")
+            elif phase_controller.phase == 5:
+                control = phase_5_output(steering_centered)
+            elif phase_controller.phase == 6:
                 control_now = time.perf_counter()
-                if phase_4_last_step_time is None:
-                    phase_4_last_step_time = control_now
-                elapsed = control_now - phase_4_last_step_time
+                if phase_6_last_step_time is None:
+                    phase_6_last_step_time = control_now
+                elapsed = control_now - phase_6_last_step_time
                 step_count = int(elapsed / KEYBOARD_SEND_INTERVAL)
                 if step_count > 0:
-                    phase_4_steering_command = min(
+                    phase_6_steering_command = min(
                         KEYBOARD_STEERING_MAX,
-                        phase_4_steering_command
+                        phase_6_steering_command
                         + KEYBOARD_STEERING_STEP * step_count,
                     )
-                    phase_4_last_step_time += (
+                    phase_6_last_step_time += (
                         step_count * KEYBOARD_SEND_INTERVAL
                     )
-                control = phase_4_max_right_output(
-                    phase_4_steering_command,
+                control = phase_6_max_right_output(
+                    phase_6_steering_command,
                     args.steering_command_scale,
                 )
-            elif phase_controller.phase == 5 and out_follow_line is not None:
-                observation = line_to_lane_curve(
-                    out_follow_line,
-                    frame.shape[0],
-                )
-                control = follower.compute(
-                    observation=observation,
-                    frame_shape=frame.shape[:2],
-                    offset_ratio=0.0,
-                )
+            elif phase_controller.phase == 7 and out_follow_line is not None:
+                if out_follow_line.valid:
+                    observation = line_to_lane_curve(
+                        out_follow_line,
+                        frame.shape[0],
+                    )
+                    control = follower.compute(
+                        observation=observation,
+                        frame_shape=frame.shape[:2],
+                        offset_ratio=0.0,
+                    )
+                    phase_7_steering_command = control.steering_command
+                    phase_7_last_step_time = time.perf_counter()
+                else:
+                    control_now = time.perf_counter()
+                    if phase_7_last_step_time is None:
+                        phase_7_last_step_time = control_now
+                    elapsed = control_now - phase_7_last_step_time
+                    step_count = int(elapsed / KEYBOARD_SEND_INTERVAL)
+                    if step_count > 0:
+                        change = KEYBOARD_STEERING_STEP * step_count
+                        if phase_7_steering_command > 0:
+                            phase_7_steering_command = max(
+                                0,
+                                phase_7_steering_command - change,
+                            )
+                        elif phase_7_steering_command < 0:
+                            phase_7_steering_command = min(
+                                0,
+                                phase_7_steering_command + change,
+                            )
+                        phase_7_last_step_time += (
+                            step_count * KEYBOARD_SEND_INTERVAL
+                        )
+                    control = phase_7_out_lost_output(
+                        phase_7_steering_command,
+                        args.steering_command_scale,
+                    )
             else:
                 control = stopped_output(
                     f"parking-dot control disabled in phase {phase_controller.phase}"
@@ -736,11 +813,11 @@ def main() -> None:
                         phase_2_steering_command,
                         args.steering_command_scale,
                     )
-                elif phase_controller.phase == 4:
-                    phase_4_steering_command = 0
-                    phase_4_last_step_time = time.perf_counter()
-                    control = phase_4_max_right_output(
-                        phase_4_steering_command,
+                elif phase_controller.phase == 6:
+                    phase_6_steering_command = 0
+                    phase_6_last_step_time = time.perf_counter()
+                    control = phase_6_max_right_output(
+                        phase_6_steering_command,
                         args.steering_command_scale,
                     )
                 elif phase_controller.phase != 0:
@@ -767,7 +844,7 @@ def main() -> None:
                 color=(0, 255, 0),
                 thickness=3,
             )
-            if phase_controller.phase == 5 and out_follow_line is not None:
+            if phase_controller.phase == 7 and out_follow_line is not None:
                 draw_line(
                     preview,
                     out_follow_line,
@@ -843,8 +920,9 @@ def main() -> None:
                     print(
                         "DRIVING: PHASE 0 follows the reference/dot midpoint; "
                         "PHASE 1 holds W+A; PHASE 2 reverses right; "
-                        "PHASE 4 drives forward right; "
-                        "PHASE 5 follows out vertically.",
+                        "PHASE 3 reverses straight; PHASE 4 waits; "
+                        "PHASE 5 drives straight; PHASE 6 drives right; "
+                        "PHASE 7 follows out.",
                         flush=True,
                     )
             if key in (ord("s"), ord("S")):

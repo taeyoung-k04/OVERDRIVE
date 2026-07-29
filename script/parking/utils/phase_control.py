@@ -21,7 +21,8 @@ class PhaseController:
     phase: int = 0
     horizontal_tolerance_deg: float = 1.0
     phase_3_reverse_seconds: float = 0.5
-    phase_3_stop_seconds: float = 4.0
+    phase_4_stop_seconds: float = 4.0
+    phase_5_forward_seconds: float = 0.5
     phase_started_at: Optional[float] = None
     previous_reference_direction_y: Optional[float] = None
 
@@ -34,28 +35,54 @@ class PhaseController:
         *,
         car_class_id: int = CLASS_TO_ID["car"],
         out_class_id: int = CLASS_TO_ID["out"],
+        steering_centered: Optional[bool] = None,
         now: Optional[float] = None,
     ) -> int:
         current_time = time.perf_counter() if now is None else float(now)
 
-        if self.phase >= 5:
+        if self.phase >= 7:
             return self.phase
 
-        if self.phase == 4:
+        if self.phase == 6:
             if np.any(class_map == int(out_class_id)):
-                self.phase = 5
+                self.phase = 7
                 self.phase_started_at = current_time
             return self.phase
 
-        if self.phase == 3:
+        if self.phase == 5:
+            if steering_centered is False:
+                self.phase_started_at = None
+                return self.phase
             if self.phase_started_at is None:
                 self.phase_started_at = current_time
             if (
                 current_time - self.phase_started_at
-                >= (
-                    self.phase_3_reverse_seconds
-                    + self.phase_3_stop_seconds
-                )
+                >= self.phase_5_forward_seconds
+            ):
+                self.phase = 6
+                self.phase_started_at = current_time
+            return self.phase
+
+        if self.phase == 4:
+            if self.phase_started_at is None:
+                self.phase_started_at = current_time
+            if (
+                current_time - self.phase_started_at
+                >= self.phase_4_stop_seconds
+            ):
+                self.phase = 5
+                self.phase_started_at = None
+            return self.phase
+
+        if self.phase == 3:
+            if steering_centered is False:
+                self.phase_started_at = None
+                return self.phase
+            if self.phase_started_at is None:
+                self.phase_started_at = current_time
+            if (
+                current_time - self.phase_started_at
+                >= self.phase_3_reverse_seconds
             ):
                 self.phase = 4
                 self.phase_started_at = current_time
@@ -84,7 +111,7 @@ class PhaseController:
                 or crossed_horizontal
             ):
                 self.phase = 3
-                self.phase_started_at = current_time
+                self.phase_started_at = None
                 self.previous_reference_direction_y = None
             else:
                 self.previous_reference_direction_y = direction_y
@@ -101,7 +128,7 @@ class PhaseController:
             bottom_x = reference_line.x_at(float(height - 1))
             if (
                 bottom_x is not None
-                and width * 0.5 <= bottom_x <= width - 1
+                and width * 0.45 <= bottom_x <= width - 1
             ):
                 self.phase = 2
                 self.phase_started_at = current_time

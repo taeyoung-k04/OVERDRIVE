@@ -150,7 +150,7 @@ def process_batch(
                 parking_dot_line,
                 now=frame_time,
             )
-        elif phase_controller.phase in (1, 2, 3, 4):
+        elif phase_controller.phase in (1, 2, 3, 4, 5, 6):
             phase_controller.update(
                 class_map,
                 reference_line=reference_line,

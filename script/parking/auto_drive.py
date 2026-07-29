@@ -229,64 +229,6 @@ def line_to_lane_curve(line: Line, frame_height: int) -> LaneCurve:
     )
 
 
-def detect_out_follow_line(
-    class_map: np.ndarray,
-    *,
-    min_component_area: int = 20,
-) -> Line:
-    """Project the largest detected out component vertically through its center."""
-    out_mask = (class_map == CLASS_TO_ID["out"]).astype(np.uint8)
-    count, labels, stats, centroids = cv2.connectedComponentsWithStats(
-        out_mask,
-        connectivity=8,
-    )
-    candidates = [
-        label
-        for label in range(1, count)
-        if int(stats[label, cv2.CC_STAT_AREA]) >= min_component_area
-    ]
-    if not candidates:
-        return Line(
-            valid=False,
-            mask=out_mask,
-            reason="out component unavailable",
-        )
-
-    label = max(
-        candidates,
-        key=lambda item: int(stats[item, cv2.CC_STAT_AREA]),
-    )
-    component = (labels == label).astype(np.uint8)
-    center_x = float(centroids[label][0])
-    component_area = int(stats[label, cv2.CC_STAT_AREA])
-    total_out_area = max(int(np.count_nonzero(out_mask)), 1)
-    height, _ = class_map.shape
-    component_bottom = (
-        int(stats[label, cv2.CC_STAT_TOP])
-        + int(stats[label, cv2.CC_STAT_HEIGHT])
-        - 1
-    )
-
-    return Line(
-        valid=True,
-        point=np.asarray(
-            [center_x, float(centroids[label][1])],
-            dtype=np.float64,
-        ),
-        direction=np.asarray([0.0, 1.0], dtype=np.float64),
-        angle_deg=90.0,
-        slope=math.inf,
-        intercept=center_x,
-        confidence=float(component_area / total_out_area),
-        mask=component,
-        segment=(
-            (int(round(center_x)), component_bottom),
-            (int(round(center_x)), height - 1),
-        ),
-        reason="vertical projection from out component",
-    )
-
-
 def midpoint_follow_line(
     first: Line,
     second: Line,
@@ -472,21 +414,20 @@ def phase_6_max_right_output(
     )
 
 
-def phase_7_out_lost_output(
-    steering_command: int,
-    steering_scale: int,
-) -> ControlOutput:
-    """Keep driving while returning steering toward zero after out is lost."""
-    scale = max(1, int(steering_scale))
-    steering_command = int(np.clip(steering_command, -scale, scale))
+def phase_7_output(steering_centered: bool) -> ControlOutput:
+    """Stop until steering is centered, then drive straight."""
     return ControlOutput(
-        valid=False,
-        steering=steering_command / scale,
-        steering_command=steering_command,
-        speed=KEYBOARD_DRIVE_SPEED,
-        confidence=0.0,
-        lost_frames=1,
-        reason="phase 7: out lost, straightening while driving",
+        valid=True,
+        steering=0.0,
+        steering_command=0,
+        speed=KEYBOARD_DRIVE_SPEED if steering_centered else 0,
+        confidence=1.0,
+        lost_frames=0,
+        reason=(
+            "phase 7: driving straight until stopped"
+            if steering_centered
+            else "phase 7: waiting for centered steering"
+        ),
     )
 
 
@@ -563,6 +504,9 @@ def main() -> None:
     )
 
     reference_detector = ReferenceLineDetector()
+    out_detector = ReferenceLineDetector(
+        class_id=CLASS_TO_ID["out"],
+    )
     parking_dot_detector = ParkingDotLineDetector()
     parking_line_detector = ParkingLineDetector()
     phase_controller = PhaseController()
@@ -579,8 +523,7 @@ def main() -> None:
     phase_2_last_step_time: float | None = None
     phase_6_steering_command = 0
     phase_6_last_step_time: float | None = None
-    phase_7_steering_command = 0
-    phase_7_last_step_time: float | None = None
+    phase_7_ready = False
     previous_time = time.perf_counter()
     fps = 0.0
     print(
@@ -628,8 +571,10 @@ def main() -> None:
             reference_line = reference_detector.detect(class_map)
             parking_dot_line: Line | None = None
             parking_lines = None
-            out_follow_line: Line | None = None
+            out_line: Line | None = None
             phase_0_follow_line: Line | None = None
+            if phase_controller.phase == 6:
+                out_line = out_detector.detect(class_map)
             if phase_controller.phase == 0:
                 parking_dot_line = parking_dot_detector.detect(class_map)
                 phase_0_follow_line = midpoint_follow_line(
@@ -660,12 +605,10 @@ def main() -> None:
                 phase_controller.update(
                     class_map,
                     reference_line=reference_line,
+                    out_line=out_line,
                     steering_centered=steering_centered,
                     now=time.perf_counter(),
                 )
-
-            if phase_controller.phase == 7:
-                out_follow_line = detect_out_follow_line(class_map)
 
             if phase_controller.phase >= 1:
                 class_map = remove_car_detections(class_map)
@@ -745,44 +688,11 @@ def main() -> None:
                     args.steering_command_scale,
                 )
             elif phase_controller.phase == 7:
-                if out_follow_line is not None and out_follow_line.valid:
-                    observation = line_to_lane_curve(
-                        out_follow_line,
-                        frame.shape[0],
-                    )
-                    control = follower.compute(
-                        observation=observation,
-                        frame_shape=frame.shape[:2],
-                        offset_ratio=0.0,
-                    )
-                    control.speed = KEYBOARD_DRIVE_SPEED
-                    phase_7_steering_command = control.steering_command
-                    phase_7_last_step_time = time.perf_counter()
-                else:
-                    control_now = time.perf_counter()
-                    if phase_7_last_step_time is None:
-                        phase_7_last_step_time = control_now
-                    elapsed = control_now - phase_7_last_step_time
-                    step_count = int(elapsed / KEYBOARD_SEND_INTERVAL)
-                    if step_count > 0:
-                        change = KEYBOARD_STEERING_STEP * step_count
-                        if phase_7_steering_command > 0:
-                            phase_7_steering_command = max(
-                                0,
-                                phase_7_steering_command - change,
-                            )
-                        elif phase_7_steering_command < 0:
-                            phase_7_steering_command = min(
-                                0,
-                                phase_7_steering_command + change,
-                            )
-                        phase_7_last_step_time += (
-                            step_count * KEYBOARD_SEND_INTERVAL
-                        )
-                    control = phase_7_out_lost_output(
-                        phase_7_steering_command,
-                        args.steering_command_scale,
-                    )
+                if previous_phase != 7:
+                    phase_7_ready = False
+                if steering_centered:
+                    phase_7_ready = True
+                control = phase_7_output(phase_7_ready)
             else:
                 control = stopped_output(
                     f"parking-dot control disabled in phase {phase_controller.phase}"
@@ -845,10 +755,10 @@ def main() -> None:
                 color=(0, 255, 0),
                 thickness=3,
             )
-            if phase_controller.phase == 7 and out_follow_line is not None:
+            if phase_controller.phase == 6 and out_line is not None:
                 draw_line(
                     preview,
-                    out_follow_line,
+                    out_line,
                     color=(255, 180, 0),
                     thickness=3,
                 )
@@ -898,6 +808,7 @@ def main() -> None:
                     arduino.emergency_stop()
                     follower.reset()
                     reference_detector.reset()
+                    out_detector.reset()
                     parking_dot_detector.reset()
                     phase_controller = PhaseController()
                     previous_phase = 0
@@ -923,7 +834,7 @@ def main() -> None:
                         "PHASE 1 holds W+A; PHASE 2 reverses right; "
                         "PHASE 3 reverses straight; PHASE 4 waits; "
                         "PHASE 5 drives straight; PHASE 6 drives right; "
-                        "PHASE 7 follows out.",
+                        "PHASE 7 centers steering and drives straight.",
                         flush=True,
                     )
             if key in (ord("s"), ord("S")):
@@ -931,6 +842,7 @@ def main() -> None:
                 arduino.emergency_stop()
                 follower.reset()
                 reference_detector.reset()
+                out_detector.reset()
                 parking_dot_detector.reset()
                 phase_controller = PhaseController()
                 previous_phase = 0
@@ -940,6 +852,7 @@ def main() -> None:
                 arduino.emergency_stop()
                 follower.reset()
                 reference_detector.reset()
+                out_detector.reset()
                 parking_dot_detector.reset()
                 phase_controller = PhaseController()
                 previous_phase = 0

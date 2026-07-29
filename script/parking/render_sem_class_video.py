@@ -11,6 +11,7 @@ import numpy as np
 from tqdm import tqdm
 
 from infer_sem_class import (
+    CLASS_TO_ID,
     DEFAULT_WEIGHTS,
     load_semantic_model,
     make_overlay,
@@ -113,6 +114,7 @@ def process_batch(
     imgsz: int,
     device: str,
     line_detector: ReferenceLineDetector,
+    out_detector: ReferenceLineDetector,
     parking_dot_detector: ParkingDotLineDetector,
     parking_line_detector: ParkingLineDetector,
     phase_controller: PhaseController,
@@ -131,6 +133,11 @@ def process_batch(
             frame.shape[:2],
         )
         reference_line = line_detector.detect(class_map)
+        out_line = (
+            out_detector.detect(class_map)
+            if phase_controller.phase == 6
+            else None
+        )
         parking_dot_line = None
         parking_lines = None
         if phase_controller.phase == 0:
@@ -154,6 +161,7 @@ def process_batch(
             phase_controller.update(
                 class_map,
                 reference_line=reference_line,
+                out_line=out_line,
                 now=frame_time,
             )
         if phase_controller.phase >= 1:
@@ -172,6 +180,13 @@ def process_batch(
             color=(0, 255, 0),
             thickness=3,
         )
+        if phase_controller.phase == 6 and out_line is not None:
+            draw_line(
+                overlay,
+                out_line,
+                color=(255, 180, 0),
+                thickness=3,
+            )
         if phase_controller.phase == 0:
             draw_line(
                 overlay,
@@ -243,6 +258,9 @@ def render_video(
     batch: list[np.ndarray] = []
     batch_times: list[float] = []
     line_detector = ReferenceLineDetector()
+    out_detector = ReferenceLineDetector(
+        class_id=CLASS_TO_ID["out"],
+    )
     parking_dot_detector = ParkingDotLineDetector()
     parking_line_detector = ParkingLineDetector()
     phase_controller = PhaseController()
@@ -282,6 +300,7 @@ def render_video(
                     imgsz,
                     device,
                     line_detector,
+                    out_detector,
                     parking_dot_detector,
                     parking_line_detector,
                     phase_controller,
@@ -300,6 +319,7 @@ def render_video(
                 imgsz,
                 device,
                 line_detector,
+                out_detector,
                 parking_dot_detector,
                 parking_line_detector,
                 phase_controller,
@@ -350,12 +370,7 @@ def main() -> None:
         args.batch = 1
 
     model = load_semantic_model(args.weights, args.backend)
-    # Temporary: render only parking videos whose filename starts with Right.
-    sources = sorted(args.input.glob("Right*.mp4"))
-    if not sources:
-        raise SystemExit(
-            f"No mp4 files starting with 'Right' found in {args.input}"
-        )
+    sources = sorted(args.input.glob("*.mp4"))
 
     for source in sources:
         render_video(

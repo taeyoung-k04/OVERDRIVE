@@ -12,6 +12,7 @@ from pathlib import Path
 import cv2
 
 from infer_sem_class import (
+    CLASS_TO_ID,
     DEFAULT_WEIGHTS,
     load_semantic_model,
     make_overlay,
@@ -232,6 +233,9 @@ def main() -> None:
     previous_time = time.perf_counter()
     measured_fps = 0.0
     line_detector = ReferenceLineDetector()
+    out_detector = ReferenceLineDetector(
+        class_id=CLASS_TO_ID["out"],
+    )
     parking_dot_detector = ParkingDotLineDetector()
     parking_line_detector = ParkingLineDetector()
     phase_controller = PhaseController()
@@ -259,6 +263,11 @@ def main() -> None:
                 frame.shape[:2],
             )
             reference_line = line_detector.detect(class_map)
+            out_line = (
+                out_detector.detect(class_map)
+                if phase_controller.phase == 6
+                else None
+            )
             parking_dot_line = None
             parking_lines = None
             if phase_controller.phase == 0:
@@ -282,6 +291,7 @@ def main() -> None:
                 phase_controller.update(
                     class_map,
                     reference_line=reference_line,
+                    out_line=out_line,
                     now=time.perf_counter(),
                 )
             if phase_controller.phase >= 1:
@@ -300,6 +310,13 @@ def main() -> None:
                 color=(0, 255, 0),
                 thickness=3,
             )
+            if phase_controller.phase == 6 and out_line is not None:
+                draw_line(
+                    preview,
+                    out_line,
+                    color=(255, 180, 0),
+                    thickness=3,
+                )
             if phase_controller.phase == 0:
                 draw_line(
                     preview,

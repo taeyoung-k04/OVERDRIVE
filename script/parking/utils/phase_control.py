@@ -25,6 +25,7 @@ class PhaseController:
     phase_5_forward_seconds: float = 1.0
     phase_started_at: Optional[float] = None
     previous_reference_direction_y: Optional[float] = None
+    previous_out_horizontal_angle: Optional[float] = None
 
     def update(
         self,
@@ -32,6 +33,7 @@ class PhaseController:
         parking_lines: Optional[ParkingLineDetection] = None,
         parking_dot_line: Optional[Line] = None,
         reference_line: Optional[Line] = None,
+        out_line: Optional[Line] = None,
         *,
         car_class_id: int = CLASS_TO_ID["car"],
         out_class_id: int = CLASS_TO_ID["out"],
@@ -44,9 +46,64 @@ class PhaseController:
             return self.phase
 
         if self.phase == 6:
-            if np.any(class_map == int(out_class_id)):
+            if (
+                out_line is None
+                or not out_line.valid
+                or out_line.direction is None
+            ):
+                return self.phase
+
+            out_angle = math.atan2(
+                float(out_line.direction[1]),
+                float(out_line.direction[0]),
+            )
+            if (
+                reference_line is not None
+                and reference_line.valid
+                and reference_line.direction is not None
+            ):
+                reference_angle = math.atan2(
+                    float(reference_line.direction[1]),
+                    float(reference_line.direction[0]),
+                )
+                angle_difference = (
+                    abs(reference_angle - out_angle) % math.pi
+                )
+                angle_difference = min(
+                    angle_difference,
+                    math.pi - angle_difference,
+                )
+                if angle_difference <= math.radians(20.0):
+                    return self.phase
+
+            out_horizontal_error = abs(out_angle) % math.pi
+            out_horizontal_error = min(
+                out_horizontal_error,
+                math.pi - out_horizontal_error,
+            )
+            signed_out_horizontal_angle = (
+                (out_angle + math.pi * 0.5) % math.pi
+                - math.pi * 0.5
+            )
+            crossed_horizontal = (
+                self.previous_out_horizontal_angle is not None
+                and self.previous_out_horizontal_angle
+                * signed_out_horizontal_angle
+                < 0.0
+            )
+            if (
+                out_horizontal_error <= math.radians(
+                    self.horizontal_tolerance_deg
+                )
+                or crossed_horizontal
+            ):
                 self.phase = 7
                 self.phase_started_at = current_time
+                self.previous_out_horizontal_angle = None
+            else:
+                self.previous_out_horizontal_angle = (
+                    signed_out_horizontal_angle
+                )
             return self.phase
 
         if self.phase == 5:
@@ -61,6 +118,7 @@ class PhaseController:
             ):
                 self.phase = 6
                 self.phase_started_at = current_time
+                self.previous_out_horizontal_angle = None
             return self.phase
 
         if self.phase == 4:

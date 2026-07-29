@@ -20,7 +20,8 @@ class PhaseController:
 
     phase: int = 0
     horizontal_tolerance_deg: float = 1.0
-    phase_3_duration_seconds: float = 4.0
+    phase_3_reverse_seconds: float = 0.5
+    phase_3_stop_seconds: float = 4.0
     phase_started_at: Optional[float] = None
     previous_reference_direction_y: Optional[float] = None
 
@@ -51,7 +52,10 @@ class PhaseController:
                 self.phase_started_at = current_time
             if (
                 current_time - self.phase_started_at
-                >= self.phase_3_duration_seconds
+                >= (
+                    self.phase_3_reverse_seconds
+                    + self.phase_3_stop_seconds
+                )
             ):
                 self.phase = 4
                 self.phase_started_at = current_time

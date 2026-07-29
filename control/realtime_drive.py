@@ -43,19 +43,24 @@ from visualization.intersection_debug import (
     draw_intersection_debug,
 )
 
+from visualization.obstacle_debug import (
+    draw_obstacle_debug,
+)
+
 from control.intersection_controller import (
+    IntersectionControlOutput,
     IntersectionController,
     IntersectionState,
 )
 
-# from perception.stop_line_detector import (
-#     StopLineDetector,
-# )
-
-from perception.traffic_light_detector import (
-    TrafficLightDetection,
-    TrafficLightDetector,
+from perception.stop_line_detector import (
+    StopLineDetector,
 )
+
+from perception.infer_traffic_light import (
+    TrafficLightInference,
+)
+from perception.infer_car import CarInference
 
 # -----------------------------------------------------------------------------
 # Command-line arguments
@@ -79,6 +84,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--show-fps", action="store_true")
     parser.add_argument("--preview", choices=("overlay", "debug"), default="debug")
     add_postprocess_args(parser)
+
+    # Intersection stopping. A lower trigger ratio stops farther away because
+    # image y increases toward the bottom of the frame.
+    parser.add_argument(
+        "--stop-line-trigger-y-ratio",
+        type=float,
+        default=0.72,
+        help="Stop-line center y ratio that triggers braking. Lower reacts earlier.",
+    )
+    parser.add_argument(
+        "--stop-line-confirm-frames",
+        type=int,
+        default=1,
+        help="Consecutive near-line frames required before braking.",
+    )
+    parser.add_argument(
+        "--stop-line-history-size",
+        type=int,
+        default=3,
+        help="Recent stop-line observations retained by the detector.",
+    )
+    parser.add_argument(
+        "--no-intersection",
+        action="store_true",
+        help="Start with intersection detection and control disabled (toggle with I).",
+    )
+    parser.add_argument(
+        "--no-obstacle",
+        action="store_true",
+        help="Start with obstacle detection and avoidance disabled (toggle with B).",
+    )
 
     # Lane extraction
     parser.add_argument(
@@ -226,7 +262,15 @@ def parse_args() -> argparse.Namespace:
         default=1.50,
         help="Total time to keep lane-change speed limiting active.",
     )
-
+    parser.add_argument(
+        "--left-corner-obstacle-confirm-seconds",
+        type=float,
+        default=0.60,
+        help=(
+            "Time lane 2 must sustain left steering before enabling the "
+            "fixed-track left-corner obstacle search."
+        ),
+    )
     # Arduino serial. The matching sketch uses C,<steering>,<speed> and X.
     parser.add_argument(
         "--arduino-port",
@@ -274,6 +318,7 @@ def validate_args(args: argparse.Namespace) -> None:
         "vanishing_y_ratio",
         "near_weight",
         "new_command_weight",
+        "stop_line_trigger_y_ratio",
     )
     for name in ratio_names:
         value = float(getattr(args, name))
@@ -298,6 +343,16 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--lane-loss-min-steering-retain must be between 0 and 1")
     if args.command_rate <= 0:
         raise SystemExit("--command-rate must be positive")
+    if args.stop_line_trigger_y_ratio <= 0.45:
+        raise SystemExit(
+            "--stop-line-trigger-y-ratio must be larger than the stop-line "
+            "ROI top ratio (0.45)"
+        )
+    if not 1 <= args.stop_line_confirm_frames <= args.stop_line_history_size:
+        raise SystemExit(
+            "--stop-line-confirm-frames must be between 1 and "
+            "--stop-line-history-size"
+        )
     if args.telemetry_stale_seconds <= 0:
         raise SystemExit("--telemetry-stale-seconds must be positive")
     if not 0.0 < args.lane_change_steering <= 1.0:
@@ -310,6 +365,10 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit(
             "--lane-change-full-steer-seconds must not exceed "
             "--lane-change-total-seconds"
+        )
+    if args.left_corner_obstacle_confirm_seconds < 0:
+        raise SystemExit(
+            "--left-corner-obstacle-confirm-seconds must be non-negative"
         )
     for name in (
         "speed_straight",
@@ -429,6 +488,16 @@ def main() -> None:
     model = load_semantic_model(args.weights, args.backend)
     postprocess_config = load_postprocess_config(args.postprocess_config) if args.postprocess else None
 
+    car_inference = CarInference(
+        model=model,
+        imgsz=args.imgsz,
+        device=args.device,
+        min_area=120,
+        corridor_center_ratio=args.vehicle_x_ratio,
+        corridor_width_ratio=0.36,
+        blocked_bottom_ratio=0.58,      
+    )
+
     capture = open_camera(args.camera, args.width, args.height, args.camera_fps)
     reader = LatestFrameReader(capture)
 
@@ -483,42 +552,46 @@ def main() -> None:
         args.initial_lane
     )
 
-    # #intersection Controller
-    # stop_line_detector = StopLineDetector(
-    #     roi_top_ratio=0.45,
-    #     trigger_y_ratio=0.72,
-    #     history_size=5,
-    #     confirm_frames=3,
-    #     vehicle_x_ratio=args.vehicle_x_ratio,
-    #     vehicle_corridor_ratio=0.30,
-    # )
-
-    traffic_light_detector = TrafficLightDetector(
-        roi_bottom_ratio=0.70,
-        min_area=20,
-        min_circularity=0.45,
-        stable_frames=3,
+    #intersection Controller
+    stop_line_detector = StopLineDetector(
+        roi_top_ratio=0.45,
+        trigger_y_ratio=args.stop_line_trigger_y_ratio,
+        history_size=args.stop_line_history_size,
+        confirm_frames=args.stop_line_confirm_frames,
+        vehicle_x_ratio=args.vehicle_x_ratio,
+        vehicle_corridor_ratio=0.30,
     )
 
-    # intersection_controller = IntersectionController(
-    #     # 정지선이 8프레임 연속 사라지면 교차로 통과 완료
-    #     clear_confirm_frames=8,
+    traffic_light_inference = TrafficLightInference(
+        model=model,
+        imgsz=args.imgsz,
+        device=args.device,
+        min_region_area=6,
+        mask_padding=8,
+        stable_frames=2,
+    )
 
-    #     # 정지선 인식이 계속 남는 경우를 위한 안전한 timeout
-    #     max_clearing_seconds=3.0,
-    #     minimum_green_confidence=0.55,
-    #     # 정차 중에는 마지막 조향각 유지
-    #     hold_steering_while_stopped=True,
+    intersection_controller = IntersectionController(
+        # 정지선이 8프레임 연속 사라지면 교차로 통과 완료
+        clear_confirm_frames=6,
 
-    #     # 초록불 출발 시 너무 빠르게 튀어나가는 것을 방지
-    #     departure_speed_cap=80,
-    #     signal_memory_seconds=1.5,
-    #     minimum_stop_seconds=2.0,
-    # )
+        # 정지선 인식이 계속 남는 경우를 위한 안전한 timeout
+        max_clearing_seconds=10.0,
+        minimum_green_confidence=0.55,
+        # 정차 중에는 마지막 조향각 유지
+        hold_steering_while_stopped=True,
+
+        # 초록불 출발 시 너무 빠르게 튀어나가는 것을 방지
+        departure_speed_cap=80,
+        # signal_memory_seconds=1.5,
+        # minimum_stop_seconds=2.0,
+    )
 
     #avoid Obstacle
     obstacle_avoidance = ObstacleAvoidanceController(
         initial_lane=current_lane,
+        obstacle_distance_cm=200,
+        clear_distance_cm=250,
         detection_confirm_frames=3,
         clear_confirm_frames=10,
     )
@@ -527,6 +600,8 @@ def main() -> None:
 
     # 라이다 연결 전 임시 테스트값
     mock_front_blocked = False
+    obstacle_enabled = not args.no_obstacle
+    intersection_enabled = not args.no_intersection
 
     window_name = "Lane Boundary Follow"
     cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
@@ -534,7 +609,20 @@ def main() -> None:
     previous_time = time.perf_counter()
     fps = 0.0
     driving_enabled = False
-    print("Controls: SPACE=start/stop, 1=select lane 1, 2=select lane 2, O=toggle mock obstacle, S=emergency stop, R=reset Arduino fault, Q or ESC=quit", flush=True)
+    previous_final_steering = 0.0
+    left_corner_started_at = None
+    print(
+        "Controls: SPACE=start/stop, 1/2=select lane, "
+        "B=toggle obstacle, I=toggle intersection, "
+        "O=toggle mock obstacle, S=emergency stop, "
+        "R=reset Arduino fault, Q or ESC=quit",
+        flush=True,
+    )
+    print(
+        f"Features: obstacle={'ON' if obstacle_enabled else 'OFF'}, "
+        f"intersection={'ON' if intersection_enabled else 'OFF'}",
+        flush=True,
+    )
 
     try:
         while True:
@@ -551,6 +639,30 @@ def main() -> None:
                 force_size=not args.no_force_size,
             )
 
+            corner_check_now = time.perf_counter()
+            left_corner_candidate = (
+                driving_enabled
+                and obstacle_enabled
+                and current_lane == DrivingLane.LANE_2
+                and not lane_change.active
+                and previous_final_steering <= -0.35
+            )
+
+            if left_corner_candidate:
+                if left_corner_started_at is None:
+                    left_corner_started_at = corner_check_now
+            else:
+                left_corner_started_at = None
+
+            left_corner_obstacle_mode = (
+                left_corner_started_at is not None
+                and (
+                    corner_check_now
+                    - left_corner_started_at
+                    >= args.left_corner_obstacle_confirm_seconds
+                )
+            )
+
             results = model.predict(
                 source=frame,
                 imgsz=args.imgsz,
@@ -560,18 +672,67 @@ def main() -> None:
                 verbose=False,
             )
             raw_class_map = semantic_to_class_map(results[0].semantic_mask, frame.shape[:2])
-
+            
+            car_result = (
+                car_inference.from_class_map(
+                    raw_class_map,
+                    # On the fixed lane-2 left corner, search toward the
+                    # inside-left path without including the participant
+                    # vehicle area outside the track on the right.
+                    corridor_left_ratio=(
+                        0.05
+                        if left_corner_obstacle_mode
+                        else None
+                    ),
+                    corridor_right_ratio=(
+                        0.50
+                        if left_corner_obstacle_mode
+                        else None
+                    ),
+                    blocked_bottom_ratio=(
+                        0.45
+                        if left_corner_obstacle_mode
+                        else None
+                    ),
+                )
+                if obstacle_enabled
+                else None
+            )
             if postprocess_config is not None:
                 processed_class_map = postprocess_class_map(raw_class_map, postprocess_config)
             else:
                 processed_class_map = raw_class_map
 
-            # stop_line_detection = stop_line_detector.detect(
-            #     raw_class_map,
-            # )
-            # traffic_light_detection = traffic_light_detector.detect(
-            #     frame,
-            # )
+            traffic_light_result = None
+            traffic_light_detection = None
+
+            if (
+                intersection_enabled
+                and intersection_controller.requires_traffic_light
+            ):
+                traffic_light_result = (
+                    traffic_light_inference.from_class_map(
+                        frame,
+                        raw_class_map,
+                    )
+                )
+                traffic_light_detection = traffic_light_result.color
+
+            traffic_light_visible = bool(
+                traffic_light_result is not None
+                and traffic_light_result.regions
+            )
+
+            if (
+                intersection_enabled
+                and intersection_controller.requires_stop_line
+            ):
+                stop_line_detection = stop_line_detector.detect(
+                    raw_class_map,
+                )
+            else:
+                stop_line_detection = None
+                stop_line_detector.reset()
 
             control_class_map = (
                 raw_class_map if args.control_source == "raw" else processed_class_map
@@ -585,21 +746,46 @@ def main() -> None:
             # Obstacle avoidance
             # ---------------------------------------------------------
 
-            # 현재는 키보드 테스트값 사용
-            front_blocked = mock_front_blocked
-            # 라이다 연결 후 예시
-            #   front_blocked = lidar_observation.front_blocked
+            avoidance_command = None
 
+            # Arduino가 전송한 최신 초음파 거리 가져오기
+            distance_data = (
+                arduino.distance_snapshot(stale_seconds=0.35)
+                if obstacle_enabled
+                else None
+            )
+
+            # 중앙 초음파 거리만 추출
+            center_distance_cm = (
+                distance_data.center_cm
+                if distance_data is not None
+                else None
+            )
+
+            # 현재 진행 경로에 차량이 있는지
+            front_blocked = bool(
+                car_result is not None
+                and car_result.front_blocked
+            )
+
+            # O 키 테스트 모드
+            # 실제 차량이나 초음파 입력이 없어도 장애물 상황을 강제로 만든다.
+            if obstacle_enabled and mock_front_blocked:
+                front_blocked = True
+                center_distance_cm = 100
             # 주행 중일 때만 장애물로 차선을 변경
             if (
                 driving_enabled
-                # and intersection_controller.allows_obstacle_avoidance
-                #and not stop_line_detection.should_stop
+                and obstacle_enabled
+                and intersection_controller.allows_obstacle_avoidance
+                # and not stop_line_detection.should_stop
             ):
                 previous_lane = current_lane
 
                 avoidance_command = obstacle_avoidance.update(
                     front_blocked=front_blocked,
+                    center_distance_cm=center_distance_cm,
+                    allow_vision_only=left_corner_obstacle_mode,
                 )
 
                 current_lane = avoidance_command.target_lane
@@ -614,6 +800,9 @@ def main() -> None:
                     )
                     print(
                         "Obstacle detected: "
+                        f"car={avoidance_command.front_blocked}, "
+                        f"distance={avoidance_command.center_distance_cm}cm, "
+                        f"left_corner={left_corner_obstacle_mode}, "
                         f"{previous_lane.name} -> {current_lane.name}",
                         flush=True,
                     )
@@ -632,68 +821,111 @@ def main() -> None:
                 offset_ratio=reference.offset_ratio,
             )
 
-            # # intersection_control = intersection_controller.update(
-            # #     stop_line=stop_line_detection,
-            # #     traffic_light=traffic_light_detection,
+            intersection_control = intersection_controller.update(
+                stop_line=stop_line_detection,
+                traffic_light=traffic_light_detection,
+                traffic_light_visible=traffic_light_visible,
+                # lane follower가 원래 보내려던 명령
+                base_steering=control.steering,
+                base_speed=control.speed,
 
-            # #     # lane follower가 원래 보내려던 명령
-            # #     base_steering=control.steering,
-            # #     base_speed=control.speed,
+                driving_enabled=driving_enabled,
+            )
+            if not intersection_enabled:
+                intersection_control = IntersectionControlOutput(
+                    state=IntersectionState.SEARCHING_RED,
+                    steering=control.steering,
+                    speed=control.speed,
+                    override_active=False,
+                    traffic_light_required=False,
+                    reason="intersection disabled",
+                )
 
-            # #     driving_enabled=driving_enabled,
-            # # )
+            # 교차로 대기 상태에 처음 진입한 프레임에서만 실행된다.
+            if intersection_control.entered_waiting:
+                obstacle_avoidance.reset(current_lane)
+                lane_change.cancel(
+                    "waiting at traffic light"
+                )
 
-            # # 교차로 대기 상태에 처음 진입한 프레임에서만 실행된다.
-            # if intersection_control.entered_waiting:
-            #     obstacle_avoidance.reset(current_lane)
+                print(
+                    "INTERSECTION: stop line confirmed, waiting for green.",
+                    flush=True,
+                )
 
-            #     print(
-            #         "INTERSECTION: waiting for green.",
-            #         flush=True,
-            #     )
+            if intersection_control.reset_traffic_light_detector:
+                traffic_light_inference.reset()
 
-            # if intersection_control.reset_traffic_light_detector:
-            #     traffic_light_detector.reset()
-            # if intersection_control.released_on_green:
-            #     print(
-            #         "INTERSECTION: green confirmed, departing.",
-            #         flush=True,
-            #     )
+            if intersection_control.reset_stop_line_detector:
+                stop_line_detector.reset()
 
-            # if intersection_control.intersection_cleared:
-            #     print(
-            #         "INTERSECTION: cleared, normal driving resumed.",
-            #         flush=True,
-            #     )
+            if intersection_control.released_on_green:
+                print(
+                    "INTERSECTION: green confirmed, departing.",
+                    flush=True,
+                )
+
+            if intersection_control.intersection_cleared:
+                traffic_light_inference.reset()
+                stop_line_detector.reset()
+
+                print(
+                    "INTERSECTION: cleared, searching for next red light.",
+                    flush=True,
+                )
 
             command_now = time.perf_counter()
-            # final_steering = intersection_control.steering
-            # final_speed = intersection_control.speed
-            final_steering = control.steering
-            final_speed = control.speed
+            final_steering = intersection_control.steering
+            final_speed = intersection_control.speed
+            # final_steering = control.steering
+            # final_speed = control.speed
 
             # Intersection/stop commands always have priority. A lane-change
             # override is allowed only while normal obstacle avoidance is
             # permitted and the vehicle has a positive drive command.
             lane_change_allowed = (
                 driving_enabled
-                # and intersection_controller.allows_obstacle_avoidance
-                # and final_speed > 0
+                and intersection_controller.allows_obstacle_avoidance
+                and final_speed > 0
             )
             if lane_change.active and not lane_change_allowed:
                 lane_change.cancel("intersection or stop command has priority")
             elif lane_change_allowed:
+                lane_change_was_active = lane_change.active
+
                 final_steering, final_speed = lane_change.apply(
                     now=command_now,
                     base_steering=final_steering,
                     base_speed=final_speed,
                 )
 
-            # if driving_enabled and arduino.enabled:
-            #     arduino.update_command(final_steering, final_speed)
+                lane_change_just_completed = (
+                    lane_change_was_active
+                    and not lane_change.active
+                )
+
+                if lane_change_just_completed:
+                    obstacle_avoidance.lane_change_completed(
+                        current_lane
+                    )
+
+                    print(
+                        "Lane change completed. "
+                        "Obstacle detection re-armed immediately.",
+                        flush=True,
+                    )
 
             if driving_enabled and arduino.enabled:
-                arduino.update_command(control.steering, control.speed)
+                arduino.update_command(
+                    final_steering,
+                    final_speed,
+                    immediate=intersection_control.entered_waiting,
+                )
+
+            previous_final_steering = final_steering
+
+            # if driving_enabled and arduino.enabled:
+            #     arduino.update_command(control.steering, control.speed)
                 
             telemetry = arduino.telemetry_snapshot(args.telemetry_stale_seconds)
             preview = make_class_overlay(frame, processed_class_map)
@@ -712,10 +944,47 @@ def main() -> None:
                     telemetry=telemetry,
                 )
                 
-                # draw_intersection_debug(
-                #     preview,
-                #     intersection_control,
-                # )
+                if intersection_enabled:
+                    draw_intersection_debug(
+                        preview,
+                        intersection_control,
+                    )
+
+                if obstacle_enabled:
+                    draw_obstacle_debug(
+                        preview,
+                        car_result,
+                        distance_data,
+                        avoidance_command,
+                        corridor_center_ratio=(
+                            0.275
+                            if left_corner_obstacle_mode
+                            else args.vehicle_x_ratio
+                        ),
+                        corridor_width_ratio=(
+                            0.45
+                            if left_corner_obstacle_mode
+                            else 0.36
+                        ),
+                        obstacle_distance_cm=200,
+                        clear_distance_cm=250,
+                        display_max_cm=250,
+                        mock_enabled=mock_front_blocked,
+                    )
+
+                cv2.putText(
+                    preview,
+                    (
+                        f"FEATURES obstacle={'ON' if obstacle_enabled else 'OFF'} "
+                        f"intersection={'ON' if intersection_enabled else 'OFF'}"
+                    ),
+                    (12, frame.shape[0] - 42),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.48,
+                    (90, 230, 90),
+                    1,
+                    cv2.LINE_AA,
+                )
 
                 if lane_change.active:
                     cv2.putText(
@@ -753,6 +1022,10 @@ def main() -> None:
                     arduino.emergency_stop()
                     follower.reset()
                     lane_detector.reset()
+                    obstacle_avoidance.reset(current_lane)
+                    intersection_controller.reset()
+                    traffic_light_inference.reset()
+                    stop_line_detector.reset()
                     lane_change.cancel()
                     print("STOPPED: drive and steering outputs disabled.", flush=True)
                 else:
@@ -786,6 +1059,10 @@ def main() -> None:
                 arduino.emergency_stop()
                 follower.reset()
                 lane_detector.reset()
+                obstacle_avoidance.reset(current_lane)
+                intersection_controller.reset()
+                traffic_light_inference.reset()
+                stop_line_detector.reset()
                 lane_change.cancel()
                 if arduino.enabled:
                     arduino.reset_fault()
@@ -842,6 +1119,25 @@ def main() -> None:
 
                 print(
                     f"Mock obstacle: front_blocked={mock_front_blocked}",
+                    flush=True,
+                )
+            if key in (ord("b"), ord("B")):
+                obstacle_enabled = not obstacle_enabled
+                obstacle_avoidance.reset(current_lane)
+                lane_change.cancel("obstacle feature toggled")
+                print(
+                    "Obstacle detection/avoidance: "
+                    f"{'ON' if obstacle_enabled else 'OFF'}",
+                    flush=True,
+                )
+            if key in (ord("i"), ord("I")):
+                intersection_enabled = not intersection_enabled
+                intersection_controller.reset()
+                traffic_light_inference.reset()
+                stop_line_detector.reset()
+                print(
+                    "Intersection detection/control: "
+                    f"{'ON' if intersection_enabled else 'OFF'}",
                     flush=True,
                 )
 

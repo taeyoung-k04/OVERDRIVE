@@ -19,8 +19,13 @@ CLASS_TO_ID = {
     "lane_center": 3,
     "lane_right": 4,
     "stop_line": 5,
+    "car": 6,
+    "traffic_light": 7,
 }
-DEFAULT_WEIGHTS = Path("runs\\semantic\\yolo_lane_sem_class\\train_cpu_640_yolo26n_ade20k\\weights\\best.onnx")
+DEFAULT_WEIGHTS = Path(
+    "runs/semantic/yolo_lane_sem_class/"
+    "train_cpu_640_yolo26n_8class/weights/best.onnx"
+)
 DEFAULT_POSTPROCESS_CONFIG = Path(".env")
 
 IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp"}
@@ -31,6 +36,8 @@ MASK_OUTPUTS = {
     "lane_center_mask": CLASS_TO_ID["lane_center"],
     "lane_right_mask": CLASS_TO_ID["lane_right"],
     "stop_line_mask": CLASS_TO_ID["stop_line"],
+    "car_mask": CLASS_TO_ID["car"],
+    "traffic_light_mask": CLASS_TO_ID["traffic_light"],
 }
 
 OVERLAY_COLORS = {
@@ -39,9 +46,19 @@ OVERLAY_COLORS = {
     CLASS_TO_ID["lane_center"]: (0, 230, 255),
     CLASS_TO_ID["lane_right"]: (80, 255, 80),
     CLASS_TO_ID["stop_line"]: (0, 0, 255),
+    CLASS_TO_ID["car"]: (255, 0, 255),
+    CLASS_TO_ID["traffic_light"]: (0, 165, 255),
 }
 OVERLAY_ALPHA = 0.32
-OVERLAY_CLASS_NAMES = ("road", "lane_left", "lane_center", "lane_right", "stop_line")
+OVERLAY_CLASS_NAMES = (
+    "road",
+    "lane_left",
+    "lane_center",
+    "lane_right",
+    "stop_line",
+    "car",
+    "traffic_light",
+)
 DEFAULT_ROAD_GAP_PX = 48.0
 DEFAULT_LANE_GAP_PX = 16.0
 DEFAULT_STOP_LINE_MIN_AREA_PX = 1024.0

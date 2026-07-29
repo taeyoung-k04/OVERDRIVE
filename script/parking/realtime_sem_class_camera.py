@@ -17,6 +17,7 @@ from infer_sem_class import (
     make_overlay,
     semantic_to_class_map,
 )
+from utils.filter_cars import filter_cars_in_parking_region
 from utils.lane_detect import (
     ParkingDotLineDetector,
     ParkingLineDetector,
@@ -122,7 +123,7 @@ def normalize_frame_size(frame, width: int, height: int):
 def draw_performance(frame, fps: float, delay: float) -> None:
     cv2.putText(
         frame,
-        f"FPS: {fps:4.1f}",
+        f"FPS: {fps:4.1f}  Delay: {delay:.3f}s",
         (12, 32),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.8,
@@ -130,9 +131,16 @@ def draw_performance(frame, fps: float, delay: float) -> None:
         2,
         cv2.LINE_AA,
     )
-    text = f"Delay: {delay:.3f}s"
+
+
+def draw_phase(frame) -> None:
+    """Draw the current parking phase in the upper-right corner."""
+    text = "PHASE 0"
     text_size, _ = cv2.getTextSize(
-        text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2
+        text,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        2,
     )
     cv2.putText(
         frame,
@@ -251,6 +259,11 @@ def main() -> None:
                 class_map,
                 excluded_points=parking_dot_line.rejected_points,
             )
+            class_map = filter_cars_in_parking_region(
+                class_map,
+                parking_dot_line,
+                parking_lines,
+            )
             preview = make_overlay(frame, class_map)
             draw_parking_lines(
                 preview,
@@ -291,6 +304,7 @@ def main() -> None:
                 )
             if args.show_fps:
                 draw_performance(preview, measured_fps, now - frame_time)
+            draw_phase(preview)
 
             cv2.imshow(window_name, preview)
             if cv2.waitKey(1) & 0xFF in (ord("q"), 27):

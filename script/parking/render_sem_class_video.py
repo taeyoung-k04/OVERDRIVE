@@ -16,6 +16,7 @@ from infer_sem_class import (
     make_overlay,
     semantic_to_class_map,
 )
+from utils.filter_cars import filter_cars_in_parking_region
 from utils.lane_detect import (
     ParkingDotLineDetector,
     ParkingLineDetector,
@@ -24,6 +25,27 @@ from utils.lane_detect import (
     draw_line,
     draw_parking_lines,
 )
+
+
+def draw_phase(image: np.ndarray) -> None:
+    """Draw the current parking phase in the upper-right corner."""
+    text = "PHASE 0"
+    text_size, _ = cv2.getTextSize(
+        text,
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        2,
+    )
+    cv2.putText(
+        image,
+        text,
+        (max(12, image.shape[1] - text_size[0] - 12), 32),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.8,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
 
 
 def draw_reference_status(
@@ -108,6 +130,11 @@ def process_batch(
             class_map,
             excluded_points=parking_dot_line.rejected_points,
         )
+        class_map = filter_cars_in_parking_region(
+            class_map,
+            parking_dot_line,
+            parking_lines,
+        )
         overlay = make_overlay(frame, class_map)
         draw_parking_lines(
             overlay,
@@ -145,6 +172,7 @@ def process_batch(
             confidence=reference_line.confidence,
             reason=reference_line.reason,
         )
+        draw_phase(overlay)
         overlays.append(overlay)
     return overlays
 

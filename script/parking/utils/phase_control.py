@@ -10,15 +10,8 @@ from typing import Optional
 import cv2
 import numpy as np
 
-try:
-    from script.parking.infer_sem_class import CLASS_TO_ID
-    from script.parking.utils.lane_detect import (
-        Line,
-        ParkingLineDetection,
-    )
-except ModuleNotFoundError:
-    from infer_sem_class import CLASS_TO_ID
-    from utils.lane_detect import Line, ParkingLineDetection
+from infer_sem_class import CLASS_TO_ID
+from utils.lane_detect import Line, ParkingLineDetection
 
 
 @dataclass

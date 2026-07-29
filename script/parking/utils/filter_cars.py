@@ -5,20 +5,12 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-try:
-    from script.parking.infer_sem_class import CLASS_TO_ID
-    from script.parking.utils.lane_detect import (
-        Line,
-        ParkingLineDetection,
-        ReferenceLineDetector,
-    )
-except ModuleNotFoundError:
-    from infer_sem_class import CLASS_TO_ID
-    from utils.lane_detect import (
-        Line,
-        ParkingLineDetection,
-        ReferenceLineDetector,
-    )
+from infer_sem_class import CLASS_TO_ID
+from utils.lane_detect import (
+    Line,
+    ParkingLineDetection,
+    ReferenceLineDetector,
+)
 
 
 def filter_cars_in_parking_region(

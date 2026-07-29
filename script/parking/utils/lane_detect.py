@@ -10,10 +10,7 @@ from typing import Optional
 import cv2
 import numpy as np
 
-try:
-    from script.parking.infer_sem_class import CLASS_TO_ID
-except ModuleNotFoundError:
-    from infer_sem_class import CLASS_TO_ID
+from infer_sem_class import CLASS_TO_ID
 
 
 @dataclass(frozen=True)

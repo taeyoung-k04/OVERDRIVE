@@ -109,6 +109,7 @@ def draw_parking_dot_status(
 def process_batch(
     model,
     frames: list[np.ndarray],
+    frame_times: list[float],
     imgsz: int,
     device: str,
     line_detector: ReferenceLineDetector,
@@ -124,7 +125,7 @@ def process_batch(
         verbose=False,
     )
     overlays: list[np.ndarray] = []
-    for frame, result in zip(frames, results):
+    for frame, frame_time, result in zip(frames, frame_times, results):
         class_map = semantic_to_class_map(
             result.semantic_mask,
             frame.shape[:2],
@@ -147,8 +148,15 @@ def process_batch(
                 class_map,
                 parking_lines,
                 parking_dot_line,
+                now=frame_time,
             )
-        if phase_controller.phase == 1:
+        elif phase_controller.phase in (1, 2, 3, 4):
+            phase_controller.update(
+                class_map,
+                reference_line=reference_line,
+                now=frame_time,
+            )
+        if phase_controller.phase >= 1:
             class_map = remove_car_detections(class_map)
         overlay = make_overlay(frame, class_map)
         if phase_controller.phase == 0:
@@ -233,6 +241,7 @@ def render_video(
     next_time = 0.0
     frame_step_time = 1.0 / output_fps
     batch: list[np.ndarray] = []
+    batch_times: list[float] = []
     line_detector = ReferenceLineDetector()
     parking_dot_detector = ParkingDotLineDetector()
     parking_line_detector = ParkingLineDetector()
@@ -262,12 +271,14 @@ def render_video(
                     interpolation=cv2.INTER_AREA,
                 )
             batch.append(frame)
+            batch_times.append(time_seconds)
             next_time += frame_step_time
 
             if len(batch) >= batch_size:
                 for overlay in process_batch(
                     model,
                     batch,
+                    batch_times,
                     imgsz,
                     device,
                     line_detector,
@@ -278,12 +289,14 @@ def render_video(
                     writer.write(overlay)
                     written += 1
                 batch.clear()
+                batch_times.clear()
                 progress.set_postfix(written=written)
 
         if batch:
             for overlay in process_batch(
                 model,
                 batch,
+                batch_times,
                 imgsz,
                 device,
                 line_detector,

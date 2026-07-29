@@ -276,8 +276,15 @@ def main() -> None:
                     class_map,
                     parking_lines,
                     parking_dot_line,
+                    now=time.perf_counter(),
                 )
-            if phase_controller.phase == 1:
+            elif phase_controller.phase in (1, 2, 3, 4):
+                phase_controller.update(
+                    class_map,
+                    reference_line=reference_line,
+                    now=time.perf_counter(),
+                )
+            if phase_controller.phase >= 1:
                 class_map = remove_car_detections(class_map)
             preview = make_overlay(frame, class_map)
             if phase_controller.phase == 0:

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
+import time
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -20,19 +23,99 @@ except ModuleNotFoundError:
 
 @dataclass
 class PhaseController:
-    """Advance from phase 0 when one car has no parking line below it."""
+    """Control parking phase transitions from fitted scene geometry."""
 
     phase: int = 0
+    horizontal_tolerance_deg: float = 1.0
+    phase_3_duration_seconds: float = 4.0
+    phase_started_at: Optional[float] = None
+    previous_reference_direction_y: Optional[float] = None
 
     def update(
         self,
         class_map: np.ndarray,
-        parking_lines: ParkingLineDetection,
-        parking_dot_line: Line,
+        parking_lines: Optional[ParkingLineDetection] = None,
+        parking_dot_line: Optional[Line] = None,
+        reference_line: Optional[Line] = None,
         *,
         car_class_id: int = CLASS_TO_ID["car"],
+        out_class_id: int = CLASS_TO_ID["out"],
+        now: Optional[float] = None,
     ) -> int:
-        if self.phase != 0:
+        current_time = time.perf_counter() if now is None else float(now)
+
+        if self.phase >= 5:
+            return self.phase
+
+        if self.phase == 4:
+            if np.any(class_map == int(out_class_id)):
+                self.phase = 5
+                self.phase_started_at = current_time
+            return self.phase
+
+        if self.phase == 3:
+            if self.phase_started_at is None:
+                self.phase_started_at = current_time
+            if (
+                current_time - self.phase_started_at
+                >= self.phase_3_duration_seconds
+            ):
+                self.phase = 4
+                self.phase_started_at = current_time
+            return self.phase
+
+        if self.phase == 2:
+            if (
+                reference_line is None
+                or not reference_line.valid
+                or reference_line.direction is None
+            ):
+                return self.phase
+
+            direction_y = float(reference_line.direction[1])
+            direction_x = float(reference_line.direction[0])
+            angle = abs(math.atan2(direction_y, direction_x))
+            horizontal_error = min(angle, abs(math.pi - angle))
+            crossed_horizontal = (
+                self.previous_reference_direction_y is not None
+                and self.previous_reference_direction_y * direction_y < 0.0
+            )
+            if (
+                horizontal_error <= math.radians(
+                    self.horizontal_tolerance_deg
+                )
+                or crossed_horizontal
+            ):
+                self.phase = 3
+                self.phase_started_at = current_time
+                self.previous_reference_direction_y = None
+            else:
+                self.previous_reference_direction_y = direction_y
+            return self.phase
+
+        if self.phase == 1:
+            if (
+                reference_line is None
+                or not reference_line.valid
+            ):
+                return self.phase
+
+            height, width = class_map.shape
+            bottom_x = reference_line.x_at(float(height - 1))
+            if (
+                bottom_x is not None
+                and width * 0.5 <= bottom_x <= width - 1
+            ):
+                self.phase = 2
+                self.phase_started_at = current_time
+                self.previous_reference_direction_y = (
+                    None
+                    if reference_line.direction is None
+                    else float(reference_line.direction[1])
+                )
+            return self.phase
+
+        if parking_lines is None or parking_dot_line is None:
             return self.phase
 
         dot_count = (
@@ -47,6 +130,7 @@ class PhaseController:
         )
         if dot_count + rejected_count <= 1:
             self.phase = 1
+            self.phase_started_at = current_time
             return self.phase
 
         car_mask = (class_map == int(car_class_id)).astype(np.uint8)
@@ -97,6 +181,7 @@ class PhaseController:
 
         if not line_below_car:
             self.phase = 1
+            self.phase_started_at = current_time
         return self.phase
 
 

@@ -17,7 +17,7 @@ except ModuleNotFoundError:
 
 
 @dataclass(frozen=True)
-class ReferenceLine:
+class Line:
     """One fitted reference line in image pixel coordinates."""
 
     valid: bool
@@ -28,6 +28,7 @@ class ReferenceLine:
     intercept: float = 0.0
     confidence: float = 0.0
     points: Optional[np.ndarray] = None
+    rejected_points: Optional[np.ndarray] = None
     mask: Optional[np.ndarray] = None
     reason: str = ""
 
@@ -299,6 +300,7 @@ class ReferenceLineDetector:
         previous: np.ndarray,
         current: np.ndarray,
     ) -> np.ndarray:
+        """Smooth line angle and signed normal offset (general intercept)."""
         previous_angle = math.atan2(previous[1], previous[0])
         current_angle = math.atan2(current[1], current[0])
         angle_delta = self._shortest_axis_angle_delta(
@@ -311,10 +313,39 @@ class ReferenceLineDetector:
             else self.line_new_weight
         )
         smoothed_angle = previous_angle + angle_weight * angle_delta
-        smoothed_point = (
-            self.position_new_weight * current[2:]
-            + (1.0 - self.position_new_weight) * previous[2:]
+
+        # A line is represented as n . p = rho, where n is perpendicular to
+        # its direction.  rho is a stable intercept for every orientation,
+        # including a horizontal line where x = slope*y + intercept fails.
+        previous_normal = np.asarray(
+            [-math.sin(previous_angle), math.cos(previous_angle)],
+            dtype=np.float64,
         )
+        current_normal = np.asarray(
+            [-math.sin(current_angle), math.cos(current_angle)],
+            dtype=np.float64,
+        )
+        previous_rho = float(np.dot(previous_normal, previous[2:]))
+        current_rho = float(np.dot(current_normal, current[2:]))
+
+        # The shortest undirected angle may represent the current direction
+        # shifted by pi.  In that case its normal and signed rho must flip.
+        adjusted_current_angle = previous_angle + angle_delta
+        half_turns = int(round(
+            (adjusted_current_angle - current_angle) / math.pi
+        ))
+        if half_turns % 2:
+            current_rho *= -1.0
+
+        smoothed_rho = (
+            self.position_new_weight * current_rho
+            + (1.0 - self.position_new_weight) * previous_rho
+        )
+        smoothed_normal = np.asarray(
+            [-math.sin(smoothed_angle), math.cos(smoothed_angle)],
+            dtype=np.float64,
+        )
+        smoothed_point = smoothed_normal * smoothed_rho
         return self._canonical_line(
             np.asarray(
                 [
@@ -327,7 +358,7 @@ class ReferenceLineDetector:
             )
         )
 
-    def detect(self, class_map: np.ndarray) -> ReferenceLine:
+    def detect(self, class_map: np.ndarray) -> Line:
         self._validate_class_map(class_map)
         height, width = class_map.shape
         now = time.perf_counter()
@@ -340,7 +371,7 @@ class ReferenceLineDetector:
 
         component = self._select_component(mask, previous)
         if component is None:
-            return ReferenceLine(
+            return Line(
                 valid=False,
                 mask=mask,
                 reason="no reference component passed the area threshold",
@@ -349,7 +380,7 @@ class ReferenceLineDetector:
         points = self._collect_points(component)
         line, inliers, inlier_ratio = self._robust_fit(points)
         if line is None:
-            return ReferenceLine(
+            return Line(
                 valid=False,
                 confidence=float(inlier_ratio),
                 points=points,
@@ -386,7 +417,7 @@ class ReferenceLineDetector:
 
         self._previous_line = line.copy()
         self._previous_time = now
-        return ReferenceLine(
+        return Line(
             valid=True,
             point=point,
             direction=direction,
@@ -400,9 +431,277 @@ class ReferenceLineDetector:
         )
 
 
-def draw_reference_line(
+class ParkingDotLineDetector(ReferenceLineDetector):
+    """Fit a line through the leftmost points of ``parking_line`` blobs.
+
+    Two or more connected components produce a new fit.  Zero or one valid
+    component reports an invalid observation.  The fitted line is returned
+    directly without temporal smoothing.
+    """
+
+    def __init__(
+        self,
+        *,
+        class_id: int = CLASS_TO_ID["parking_line"],
+        min_component_area: int = 20,
+        outlier_distance_ratio: float = 0.02,
+        **kwargs,
+    ) -> None:
+        # General reference-line fitting uses many mask pixels, whereas this
+        # detector fits one point per connected component.  Two points are
+        # therefore sufficient.
+        kwargs.setdefault("min_line_points", 2)
+        if outlier_distance_ratio <= 0:
+            raise ValueError("outlier_distance_ratio must be positive")
+        super().__init__(
+            class_id=class_id,
+            min_component_area=min_component_area,
+            **kwargs,
+        )
+        self.outlier_distance_ratio = float(outlier_distance_ratio)
+
+    @staticmethod
+    def _clean_dot_mask(mask: np.ndarray) -> np.ndarray:
+        """Remove isolated noise without joining separate parking dots."""
+        binary = (mask > 0).astype(np.uint8)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        return cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+
+    def _leftmost_component_points(
+        self,
+        mask: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, int]:
+        """Return one leftmost point for every valid connected component."""
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            mask,
+            connectivity=8,
+        )
+        points: list[tuple[float, float]] = []
+        selected_mask = np.zeros_like(mask, dtype=np.uint8)
+
+        for label in range(1, count):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < self.min_component_area:
+                continue
+
+            component_ys, component_xs = np.nonzero(labels == label)
+            if component_xs.size == 0:
+                continue
+
+            left_x = int(np.min(component_xs))
+            left_ys = component_ys[component_xs == left_x]
+            left_y = float(np.median(left_ys))
+            points.append((float(left_x), left_y))
+            selected_mask[labels == label] = 1
+
+        if not points:
+            return (
+                np.empty((0, 2), dtype=np.float64),
+                selected_mask,
+                0,
+            )
+
+        # Stable ordering makes debug output and fitting deterministic.
+        point_array = np.asarray(points, dtype=np.float64)
+        order = np.lexsort((point_array[:, 0], point_array[:, 1]))
+        return point_array[order], selected_mask, len(points)
+
+    @staticmethod
+    def _orthogonal_residuals(
+        points: np.ndarray,
+        line: np.ndarray,
+    ) -> np.ndarray:
+        """Return perpendicular pixel distances from points to ``line``."""
+        direction = line[:2]
+        origin = line[2:]
+        delta = points - origin
+        return np.abs(
+            direction[0] * delta[:, 1]
+            - direction[1] * delta[:, 0]
+        )
+
+    def _fit_remove_outliers_refit(
+        self,
+        points: np.ndarray,
+        image_width: int,
+    ) -> tuple[Optional[np.ndarray], np.ndarray, float]:
+        """Fit all points, reject distant points, and refit the inliers."""
+        point_count = len(points)
+        if point_count < 2:
+            return None, np.zeros(point_count, dtype=bool), 0.0
+
+        initial_line = self._fit_line(points)
+        residuals = self._orthogonal_residuals(points, initial_line)
+        threshold_px = max(
+            2.0,
+            float(image_width) * self.outlier_distance_ratio,
+        )
+        inliers = residuals <= threshold_px
+        inlier_count = int(np.count_nonzero(inliers))
+        inlier_ratio = inlier_count / point_count
+
+        if inlier_count < 2 or inlier_ratio < self.min_inlier_ratio:
+            return None, inliers, inlier_ratio
+
+        refined_line = self._fit_line(points[inliers])
+        return refined_line, inliers, inlier_ratio
+
+    @staticmethod
+    def _line_observation(
+        line: np.ndarray,
+        *,
+        confidence: float,
+        points: np.ndarray,
+        rejected_points: np.ndarray,
+        mask: np.ndarray,
+        reason: str,
+    ) -> Line:
+        direction = line[:2].copy()
+        point = line[2:].copy()
+        angle_deg = float(np.degrees(math.atan2(direction[1], direction[0])))
+
+        if abs(direction[1]) >= 1e-6:
+            slope = float(direction[0] / direction[1])
+            intercept = float(point[0] - slope * point[1])
+        else:
+            slope = math.inf
+            intercept = math.nan
+
+        return Line(
+            valid=True,
+            point=point,
+            direction=direction,
+            angle_deg=angle_deg,
+            slope=slope,
+            intercept=intercept,
+            confidence=float(np.clip(confidence, 0.0, 1.0)),
+            points=points,
+            rejected_points=rejected_points,
+            mask=mask,
+            reason=reason,
+        )
+
+    def detect(self, class_map: np.ndarray) -> Line:
+        """Detect ``parking_dot_line`` from parking-line components."""
+        self._validate_class_map(class_map)
+        height, width = class_map.shape
+
+        roi_top = int(np.clip(round(height * self.roi_top_ratio), 0, height - 1))
+        mask = (class_map == self.class_id).astype(np.uint8)
+        mask[:roi_top] = 0
+        mask = self._clean_dot_mask(mask)
+
+        points, selected_mask, component_count = (
+            self._leftmost_component_points(mask)
+        )
+
+        if component_count == 0:
+            return Line(
+                valid=False,
+                points=points,
+                mask=selected_mask,
+                reason="not detected: no components",
+            )
+
+        if component_count == 1:
+            return Line(
+                valid=False,
+                points=points,
+                mask=selected_mask,
+                reason=(
+                    "not detected: only one component"
+                ),
+            )
+
+        line, inliers, inlier_ratio = self._fit_remove_outliers_refit(
+            points,
+            width,
+        )
+        if line is None:
+            return Line(
+                valid=False,
+                confidence=float(inlier_ratio),
+                points=points[inliers],
+                rejected_points=points[~inliers],
+                mask=selected_mask,
+                reason=(
+                    f"parking_dot_line fit rejected: "
+                    f"{int(np.count_nonzero(inliers))}/{component_count} inliers"
+                ),
+            )
+
+        inlier_points = points[inliers]
+        projections = inlier_points @ line[:2]
+        coverage = (
+            float(np.ptp(projections)) / max(math.hypot(width, height), 1.0)
+            if len(projections) > 1
+            else 0.0
+        )
+        confidence = float(
+            np.clip(0.75 * inlier_ratio + 0.25 * coverage, 0.0, 1.0)
+        )
+
+        return self._line_observation(
+            line,
+            confidence=confidence,
+            points=inlier_points,
+            rejected_points=points[~inliers],
+            mask=selected_mask,
+            reason=(
+                f"parking_dot_line fitted from "
+                f"{component_count} components"
+            ),
+        )
+
+
+def draw_line_points(
     image: np.ndarray,
-    line: ReferenceLine,
+    line: Line,
+    *,
+    color: tuple[int, int, int] = (0, 200, 255),
+    rejected_color: tuple[int, int, int] = (0, 0, 255),
+    radius: int = 6,
+) -> np.ndarray:
+    """Draw the component points used for fitting ``line``."""
+    if not isinstance(image, np.ndarray) or image.ndim != 3:
+        raise ValueError("image must have shape (H, W, C)")
+    if line.points is None:
+        return image
+
+    height, width = image.shape[:2]
+    for x, y in np.asarray(line.points).reshape(-1, 2):
+        center = (
+            int(np.clip(round(float(x)), 0, width - 1)),
+            int(np.clip(round(float(y)), 0, height - 1)),
+        )
+        cv2.circle(
+            image,
+            center,
+            max(1, int(radius)),
+            color,
+            thickness=-1,
+            lineType=cv2.LINE_AA,
+        )
+    if line.rejected_points is not None:
+        for x, y in np.asarray(line.rejected_points).reshape(-1, 2):
+            center = (
+                int(np.clip(round(float(x)), 0, width - 1)),
+                int(np.clip(round(float(y)), 0, height - 1)),
+            )
+            cv2.circle(
+                image,
+                center,
+                max(1, int(radius)),
+                rejected_color,
+                thickness=-1,
+                lineType=cv2.LINE_AA,
+            )
+    return image
+
+
+def draw_line(
+    image: np.ndarray,
+    line: Line,
     *,
     color: tuple[int, int, int] = (0, 255, 0),
     thickness: int = 2,
@@ -417,7 +716,9 @@ def draw_reference_line(
 
 
 __all__ = [
-    "ReferenceLine",
+    "ParkingDotLineDetector",
+    "Line",
     "ReferenceLineDetector",
-    "draw_reference_line",
+    "draw_line_points",
+    "draw_line",
 ]

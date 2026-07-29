@@ -17,8 +17,10 @@ from infer_sem_class import (
     semantic_to_class_map,
 )
 from utils.lane_detect import (
+    ParkingDotLineDetector,
     ReferenceLineDetector,
-    draw_reference_line,
+    draw_line_points,
+    draw_line,
 )
 
 
@@ -34,7 +36,7 @@ def draw_reference_status(
         text = f"REFERENCE LINE: OK  confidence={confidence:.2f}"
         color = (70, 255, 70)
     else:
-        text = f"REFERENCE LINE: LOST  {reason}"
+        text = f"REFERENCE LINE: LOST"
         color = (0, 80, 255)
 
     cv2.putText(
@@ -49,12 +51,40 @@ def draw_reference_status(
     )
 
 
+def draw_parking_dot_status(
+    image: np.ndarray,
+    *,
+    valid: bool,
+    confidence: float,
+    reason: str,
+) -> None:
+    """Draw parking-dot-line state directly above reference-line state."""
+    if valid:
+        text = f"PARKING DOT LINE: OK  confidence={confidence:.2f}"
+        color = (255, 255, 70)
+    else:
+        text = f"PARKING DOT LINE: LOST"
+        color = (0, 80, 255)
+
+    cv2.putText(
+        image,
+        text,
+        (12, image.shape[0] - 44),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
+
+
 def process_batch(
     model,
     frames: list[np.ndarray],
     imgsz: int,
     device: str,
     line_detector: ReferenceLineDetector,
+    parking_dot_detector: ParkingDotLineDetector,
 ) -> list[np.ndarray]:
     results = model.predict(
         source=frames,
@@ -70,12 +100,31 @@ def process_batch(
             frame.shape[:2],
         )
         reference_line = line_detector.detect(class_map)
+        parking_dot_line = parking_dot_detector.detect(class_map)
         overlay = make_overlay(frame, class_map)
-        draw_reference_line(
+        draw_line(
             overlay,
             reference_line,
             color=(0, 255, 0),
             thickness=3,
+        )
+        draw_line(
+            overlay,
+            parking_dot_line,
+            color=(0, 255, 255),
+            thickness=3,
+        )
+        draw_line_points(
+            overlay,
+            parking_dot_line,
+            color=(0, 200, 255),
+            radius=6,
+        )
+        draw_parking_dot_status(
+            overlay,
+            valid=parking_dot_line.valid,
+            confidence=parking_dot_line.confidence,
+            reason=parking_dot_line.reason,
         )
         draw_reference_status(
             overlay,
@@ -127,6 +176,7 @@ def render_video(
     frame_step_time = 1.0 / output_fps
     batch: list[np.ndarray] = []
     line_detector = ReferenceLineDetector()
+    parking_dot_detector = ParkingDotLineDetector()
     progress = tqdm(
         total=total_frames if total_frames > 0 else None,
         desc=source.stem,
@@ -161,6 +211,7 @@ def render_video(
                     imgsz,
                     device,
                     line_detector,
+                    parking_dot_detector,
                 ):
                     writer.write(overlay)
                     written += 1
@@ -174,6 +225,7 @@ def render_video(
                 imgsz,
                 device,
                 line_detector,
+                parking_dot_detector,
             ):
                 writer.write(overlay)
                 written += 1

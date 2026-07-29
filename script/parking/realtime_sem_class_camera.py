@@ -18,9 +18,11 @@ from infer_sem_class import (
     semantic_to_class_map,
 )
 from utils.lane_detect import (
-    ReferenceLine,
+    ParkingDotLineDetector,
+    Line,
     ReferenceLineDetector,
-    draw_reference_line,
+    draw_line_points,
+    draw_line,
 )
 
 
@@ -142,7 +144,7 @@ def draw_performance(frame, fps: float, delay: float) -> None:
     )
 
 
-def draw_reference_status(frame, line: ReferenceLine) -> None:
+def draw_reference_status(frame, line: Line) -> None:
     """Draw reference-line fitting information on the preview."""
     if line.valid:
         text = (
@@ -150,13 +152,36 @@ def draw_reference_status(frame, line: ReferenceLine) -> None:
         )
         color = (70, 255, 70)
     else:
-        text = f"REFERENCE LINE: LOST  {line.reason}"
+        text = f"REFERENCE LINE: LOST"
         color = (0, 80, 255)
 
     cv2.putText(
         frame,
         text,
         (12, frame.shape[0] - 18),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
+
+
+def draw_parking_dot_status(frame, line: Line) -> None:
+    """Draw parking-dot-line state directly above reference-line state."""
+    if line.valid:
+        text = (
+            f"PARKING DOT LINE: OK  confidence={line.confidence:.2f}"
+        )
+        color = (255, 255, 70)
+    else:
+        text = f"PARKING DOT LINE: LOST"
+        color = (0, 80, 255)
+
+    cv2.putText(
+        frame,
+        text,
+        (12, frame.shape[0] - 44),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.58,
         color,
@@ -193,6 +218,7 @@ def main() -> None:
     previous_time = time.perf_counter()
     measured_fps = 0.0
     line_detector = ReferenceLineDetector()
+    parking_dot_detector = ParkingDotLineDetector()
 
     try:
         while True:
@@ -217,13 +243,27 @@ def main() -> None:
                 frame.shape[:2],
             )
             reference_line = line_detector.detect(class_map)
+            parking_dot_line = parking_dot_detector.detect(class_map)
             preview = make_overlay(frame, class_map)
-            draw_reference_line(
+            draw_line(
                 preview,
                 reference_line,
                 color=(0, 255, 0),
                 thickness=3,
             )
+            draw_line(
+                preview,
+                parking_dot_line,
+                color=(0, 255, 255),
+                thickness=3,
+            )
+            draw_line_points(
+                preview,
+                parking_dot_line,
+                color=(0, 200, 255),
+                radius=6,
+            )
+            draw_parking_dot_status(preview, parking_dot_line)
             draw_reference_status(preview, reference_line)
 
             now = time.perf_counter()

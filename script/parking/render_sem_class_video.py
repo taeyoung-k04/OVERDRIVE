@@ -18,9 +18,11 @@ from infer_sem_class import (
 )
 from utils.lane_detect import (
     ParkingDotLineDetector,
+    ParkingLineDetector,
     ReferenceLineDetector,
     draw_line_points,
     draw_line,
+    draw_parking_lines,
 )
 
 
@@ -85,6 +87,7 @@ def process_batch(
     device: str,
     line_detector: ReferenceLineDetector,
     parking_dot_detector: ParkingDotLineDetector,
+    parking_line_detector: ParkingLineDetector,
 ) -> list[np.ndarray]:
     results = model.predict(
         source=frames,
@@ -101,7 +104,17 @@ def process_batch(
         )
         reference_line = line_detector.detect(class_map)
         parking_dot_line = parking_dot_detector.detect(class_map)
+        parking_lines = parking_line_detector.detect(
+            class_map,
+            excluded_points=parking_dot_line.rejected_points,
+        )
         overlay = make_overlay(frame, class_map)
+        draw_parking_lines(
+            overlay,
+            parking_lines,
+            color=(0, 140, 255),
+            thickness=3,
+        )
         draw_line(
             overlay,
             reference_line,
@@ -177,6 +190,7 @@ def render_video(
     batch: list[np.ndarray] = []
     line_detector = ReferenceLineDetector()
     parking_dot_detector = ParkingDotLineDetector()
+    parking_line_detector = ParkingLineDetector()
     progress = tqdm(
         total=total_frames if total_frames > 0 else None,
         desc=source.stem,
@@ -212,6 +226,7 @@ def render_video(
                     device,
                     line_detector,
                     parking_dot_detector,
+                    parking_line_detector,
                 ):
                     writer.write(overlay)
                     written += 1
@@ -226,6 +241,7 @@ def render_video(
                 device,
                 line_detector,
                 parking_dot_detector,
+                parking_line_detector,
             ):
                 writer.write(overlay)
                 written += 1

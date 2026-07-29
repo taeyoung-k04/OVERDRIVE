@@ -30,6 +30,7 @@ class Line:
     points: Optional[np.ndarray] = None
     rejected_points: Optional[np.ndarray] = None
     mask: Optional[np.ndarray] = None
+    segment: Optional[tuple[tuple[int, int], tuple[int, int]]] = None
     reason: str = ""
 
     def x_at(self, y: float) -> Optional[float]:
@@ -55,6 +56,9 @@ class Line:
         del top_ratio, bottom_ratio  # Retained for API compatibility.
         if not self.valid or self.point is None or self.direction is None:
             return None
+
+        if self.segment is not None:
+            return self.segment
 
         height, width = image_shape[:2]
         if height <= 0 or width <= 0:
@@ -654,6 +658,186 @@ class ParkingDotLineDetector(ReferenceLineDetector):
         )
 
 
+@dataclass(frozen=True)
+class ParkingLineDetection:
+    """Horizontal parking-line segments detected in one frame."""
+
+    lines: tuple[Line, ...]
+    component_count: int
+    rejected_count: int
+
+    @property
+    def valid(self) -> bool:
+        return bool(self.lines)
+
+
+class ParkingLineDetector(ReferenceLineDetector):
+    """Fit each ``parking_line`` component as a near-horizontal segment."""
+
+    def __init__(
+        self,
+        *,
+        class_id: int = CLASS_TO_ID["parking_line"],
+        min_component_area: int = 20,
+        max_horizontal_angle_deg: float = 20.0,
+        **kwargs,
+    ) -> None:
+        if not 0.0 <= max_horizontal_angle_deg < 90.0:
+            raise ValueError(
+                "max_horizontal_angle_deg must be in [0, 90)"
+            )
+        kwargs.setdefault("min_line_points", 2)
+        super().__init__(
+            class_id=class_id,
+            min_component_area=min_component_area,
+            **kwargs,
+        )
+        self.max_horizontal_angle_rad = float(
+            np.deg2rad(max_horizontal_angle_deg)
+        )
+
+    @staticmethod
+    def _horizontal_angle(direction: np.ndarray) -> float:
+        angle = abs(float(math.atan2(direction[1], direction[0])))
+        return min(angle, abs(math.pi - angle))
+
+    def detect(
+        self,
+        class_map: np.ndarray,
+        *,
+        excluded_points: Optional[np.ndarray] = None,
+    ) -> ParkingLineDetection:
+        """Return one fitted segment for each horizontal parking component."""
+        self._validate_class_map(class_map)
+        height, width = class_map.shape
+        roi_top = int(np.clip(round(height * self.roi_top_ratio), 0, height - 1))
+        mask = (class_map == self.class_id).astype(np.uint8)
+        mask[:roi_top] = 0
+        mask = ParkingDotLineDetector._clean_dot_mask(mask)
+
+        count, labels, stats, _ = cv2.connectedComponentsWithStats(
+            mask,
+            connectivity=8,
+        )
+        lines: list[Line] = []
+        component_count = 0
+        rejected_count = 0
+        excluded = (
+            np.asarray(excluded_points, dtype=np.float64).reshape(-1, 2)
+            if excluded_points is not None
+            else np.empty((0, 2), dtype=np.float64)
+        )
+
+        for label in range(1, count):
+            area = int(stats[label, cv2.CC_STAT_AREA])
+            if area < self.min_component_area:
+                continue
+            component_count += 1
+
+            ys, xs = np.nonzero(labels == label)
+            points = np.column_stack((xs, ys)).astype(np.float64)
+
+            # ParkingDotLineDetector marks an outlier at the component's
+            # leftmost point.  Do not create a parking-line segment for the
+            # component represented by that red point.
+            left_x = float(np.min(xs))
+            left_ys = ys[xs == int(left_x)]
+            left_point = np.asarray(
+                [left_x, float(np.median(left_ys))],
+                dtype=np.float64,
+            )
+            if (
+                len(excluded)
+                and float(np.min(np.linalg.norm(
+                    excluded - left_point,
+                    axis=1,
+                ))) <= 2.0
+            ):
+                rejected_count += 1
+                continue
+
+            sampled = points[:: self.point_step]
+            if len(sampled) < self.min_line_points:
+                rejected_count += 1
+                continue
+
+            line, inliers, inlier_ratio = self._robust_fit(sampled)
+            if (
+                line is None
+                or self._horizontal_angle(line[:2])
+                > self.max_horizontal_angle_rad
+            ):
+                rejected_count += 1
+                continue
+
+            inlier_points = sampled[inliers]
+            direction_x = float(line[0])
+            if abs(direction_x) < 1e-6:
+                rejected_count += 1
+                continue
+
+            # Stop at the component's left edge, then extend the fitted line
+            # all the way to the right edge of the image.
+            start_x = float(np.min(inlier_points[:, 0]))
+            end_x = float(width - 1)
+            start_scale = (start_x - float(line[2])) / direction_x
+            end_scale = (end_x - float(line[2])) / direction_x
+            start = line[2:] + line[:2] * start_scale
+            end = line[2:] + line[:2] * end_scale
+            segment = (
+                (
+                    int(np.clip(round(start[0]), 0, width - 1)),
+                    int(np.clip(round(start[1]), 0, height - 1)),
+                ),
+                (
+                    int(np.clip(round(end[0]), 0, width - 1)),
+                    int(np.clip(round(end[1]), 0, height - 1)),
+                ),
+            )
+            direction = line[:2].copy()
+            origin = line[2:].copy()
+            angle_deg = float(
+                np.degrees(math.atan2(direction[1], direction[0]))
+            )
+            lines.append(
+                Line(
+                    valid=True,
+                    point=origin,
+                    direction=direction,
+                    angle_deg=angle_deg,
+                    confidence=float(inlier_ratio),
+                    points=inlier_points,
+                    mask=(labels == label).astype(np.uint8),
+                    segment=segment,
+                    reason="horizontal parking line fitted",
+                )
+            )
+
+        return ParkingLineDetection(
+            lines=tuple(lines),
+            component_count=component_count,
+            rejected_count=rejected_count,
+        )
+
+
+def draw_parking_lines(
+    image: np.ndarray,
+    detection: ParkingLineDetection,
+    *,
+    color: tuple[int, int, int] = (0, 140, 255),
+    thickness: int = 3,
+) -> np.ndarray:
+    """Draw all detected parking-line segments."""
+    for line in detection.lines:
+        draw_line(
+            image,
+            line,
+            color=color,
+            thickness=thickness,
+        )
+    return image
+
+
 def draw_line_points(
     image: np.ndarray,
     line: Line,
@@ -716,9 +900,12 @@ def draw_line(
 
 
 __all__ = [
+    "ParkingLineDetection",
+    "ParkingLineDetector",
     "ParkingDotLineDetector",
     "Line",
     "ReferenceLineDetector",
     "draw_line_points",
     "draw_line",
+    "draw_parking_lines",
 ]

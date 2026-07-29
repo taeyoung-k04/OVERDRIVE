@@ -19,10 +19,12 @@ from infer_sem_class import (
 )
 from utils.lane_detect import (
     ParkingDotLineDetector,
+    ParkingLineDetector,
     Line,
     ReferenceLineDetector,
     draw_line_points,
     draw_line,
+    draw_parking_lines,
 )
 
 
@@ -219,6 +221,7 @@ def main() -> None:
     measured_fps = 0.0
     line_detector = ReferenceLineDetector()
     parking_dot_detector = ParkingDotLineDetector()
+    parking_line_detector = ParkingLineDetector()
 
     try:
         while True:
@@ -244,7 +247,17 @@ def main() -> None:
             )
             reference_line = line_detector.detect(class_map)
             parking_dot_line = parking_dot_detector.detect(class_map)
+            parking_lines = parking_line_detector.detect(
+                class_map,
+                excluded_points=parking_dot_line.rejected_points,
+            )
             preview = make_overlay(frame, class_map)
+            draw_parking_lines(
+                preview,
+                parking_lines,
+                color=(0, 140, 255),
+                thickness=3,
+            )
             draw_line(
                 preview,
                 reference_line,

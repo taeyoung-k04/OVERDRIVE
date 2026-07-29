@@ -1,0 +1,4 @@
+nc: 4
+names: ['car', 'out', 'parking_line', 'reference']
+
+format: yolo26

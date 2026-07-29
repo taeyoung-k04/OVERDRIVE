@@ -146,8 +146,7 @@ def draw_reference_status(frame, line: ReferenceLine) -> None:
     """Draw reference-line fitting information on the preview."""
     if line.valid:
         text = (
-            f"REFERENCE LINE: OK  "
-            f"slope={line.slope:+.3f}  confidence={line.confidence:.2f}"
+            f"REFERENCE LINE: OK  confidence={line.confidence:.2f}"
         )
         color = (70, 255, 70)
     else:

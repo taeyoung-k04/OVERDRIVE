@@ -105,9 +105,9 @@ class Pose2D:
 @dataclass
 class Config:
     # Serial
-    arduino_port: str = "COM6"
+    arduino_port: str = "COM8"
     arduino_baud: int = 115200
-    lidar_port: str = "COM7"
+    lidar_port: str = "COM5"
     lidar_baud: int = 115200
 
     # LiDAR installation. Coordinates are in the vehicle frame:

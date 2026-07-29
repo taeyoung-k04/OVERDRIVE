@@ -6,6 +6,10 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from concurrent.futures import (
+    Future,
+    ThreadPoolExecutor,
+)
 from pathlib import Path
 
 import cv2
@@ -73,7 +77,7 @@ def parse_args() -> argparse.Namespace:
     # Model / camera
     parser.add_argument("--weights", type=Path, default=DEFAULT_WEIGHTS)
     parser.add_argument("--backend", choices=("auto", "pt", "onnx"), default="onnx")
-    parser.add_argument("--camera", type=int, default=1)
+    parser.add_argument("--camera", type=int, default=0)
     parser.add_argument("--imgsz", type=int, default=640)
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--width", type=int, default=640)
@@ -245,6 +249,12 @@ def parse_args() -> argparse.Namespace:
         help="Absolute normalized steering used during the hard lane-change phase (0..1).",
     )
     parser.add_argument(
+        "--lane-change-right-steering",
+        type=float,
+        default=0.5,
+        help="Steering magnitude used when changing from LANE_1 to LANE_2.",
+    )
+    parser.add_argument(
         "--lane-change-speed",
         type=int,
         default=175,
@@ -253,29 +263,86 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--lane-change-full-steer-seconds",
         type=float,
-        default=0.80,
-        help="How long to hold maximum steering at the start of a lane change.",
+        default=0.55,#0.8
+        help="How long to hold configured steering at the start of a lane change.",
     )
     parser.add_argument(
         "--lane-change-total-seconds",
         type=float,
-        default=1.50,
-        help="Total time to keep lane-change speed limiting active.",
+        default=2.0,#1.50
+        help="Total lane-change time when moving from LANE_2 to LANE_1.",
     )
     parser.add_argument(
-        "--left-corner-obstacle-confirm-seconds",
+        "--lane-change-right-total-seconds",
         type=float,
-        default=0.60,
+        default=2.5,
+        help="Total lane-change time when moving from LANE_1 to LANE_2.",
+    )
+    parser.add_argument(
+        "--obstacle-path-half-width-ratio",
+        type=float,
+        default=0.13,
         help=(
-            "Time lane 2 must sustain left steering before enabling the "
-            "fixed-track left-corner obstacle search."
+            "Half-width around the perspective-scaled virtual lane path "
+            "used to assign a detected car to the current lane."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-path-min-scale",
+        type=float,
+        default=0.40,
+        help=(
+            "Minimum perspective scale for the obstacle path width. "
+            "Higher values keep the far-field lane search wider."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-road-margin-ratio",
+        type=float,
+        default=0.025,
+        help=(
+            "Image-width margin added around the learned main-road mask "
+            "to bridge small far-field segmentation gaps."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-min-bottom-ratio",
+        type=float,
+        default=0.30,
+        help=(
+            "Minimum car bounding-box bottom y ratio. Lower values detect "
+            "vehicles farther ahead."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-car-min-area",
+        type=int,
+        default=60,
+        help="Minimum semantic car component area in pixels.",
+    )
+    parser.add_argument(
+        "--obstacle-lane-memory-seconds",
+        type=float,
+        default=1.0,
+        help=(
+            "How long the obstacle detector may reuse the latest valid "
+            "lane curve during a short semantic dropout."
+        ),
+    )
+    parser.add_argument(
+        "--obstacle-analysis-hz",
+        type=float,
+        default=8.0,
+        help=(
+            "Maximum obstacle postprocessing rate. Lane following still "
+            "runs every frame; only obstacle analysis is rate-limited."
         ),
     )
     # Arduino serial. The matching sketch uses C,<steering>,<speed> and X.
     parser.add_argument(
         "--arduino-port",
-        default="COM6",
-        help="For example COM6 or /dev/ttyACM0. Omit for vision-only mode.",
+        default="COM8",
+        help="For example COM8 or /dev/ttyACM0. Omit for vision-only mode.",
     )
     parser.add_argument("--baud", type=int, default=115200)
     parser.add_argument("--serial-timeout", type=float, default=0.10)
@@ -357,18 +424,58 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--telemetry-stale-seconds must be positive")
     if not 0.0 < args.lane_change_steering <= 1.0:
         raise SystemExit("--lane-change-steering must be greater than 0 and at most 1")
+    if not 0.0 < args.lane_change_right_steering <= 1.0:
+        raise SystemExit(
+            "--lane-change-right-steering must be greater than 0 and at most 1"
+        )
     if args.lane_change_full_steer_seconds < 0:
         raise SystemExit("--lane-change-full-steer-seconds must be non-negative")
     if args.lane_change_total_seconds <= 0:
         raise SystemExit("--lane-change-total-seconds must be positive")
+    if args.lane_change_right_total_seconds <= 0:
+        raise SystemExit(
+            "--lane-change-right-total-seconds must be positive"
+        )
     if args.lane_change_full_steer_seconds > args.lane_change_total_seconds:
         raise SystemExit(
             "--lane-change-full-steer-seconds must not exceed "
             "--lane-change-total-seconds"
         )
-    if args.left_corner_obstacle_confirm_seconds < 0:
+    if (
+        args.lane_change_full_steer_seconds
+        > args.lane_change_right_total_seconds
+    ):
         raise SystemExit(
-            "--left-corner-obstacle-confirm-seconds must be non-negative"
+            "--lane-change-full-steer-seconds must not exceed "
+            "--lane-change-right-total-seconds"
+        )
+    if not 0.0 < args.obstacle_path_half_width_ratio <= 0.5:
+        raise SystemExit(
+            "--obstacle-path-half-width-ratio must be in (0, 0.5]"
+        )
+    if not 0.0 < args.obstacle_path_min_scale <= 1.0:
+        raise SystemExit(
+            "--obstacle-path-min-scale must be in (0, 1]"
+        )
+    if not 0.0 <= args.obstacle_road_margin_ratio <= 0.25:
+        raise SystemExit(
+            "--obstacle-road-margin-ratio must be in [0, 0.25]"
+        )
+    if not 0.0 <= args.obstacle_min_bottom_ratio <= 1.0:
+        raise SystemExit(
+            "--obstacle-min-bottom-ratio must be in [0, 1]"
+        )
+    if args.obstacle_car_min_area < 1:
+        raise SystemExit(
+            "--obstacle-car-min-area must be at least 1"
+        )
+    if args.obstacle_lane_memory_seconds < 0:
+        raise SystemExit(
+            "--obstacle-lane-memory-seconds must be non-negative"
+        )
+    if args.obstacle_analysis_hz <= 0:
+        raise SystemExit(
+            "--obstacle-analysis-hz must be positive"
         )
     for name in (
         "speed_straight",
@@ -390,9 +497,17 @@ class LaneChangeManeuver:
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.max_steering = float(args.lane_change_steering)
+        self.right_max_steering = float(
+            args.lane_change_right_steering
+        )
+        self.active_max_steering = self.max_steering
         self.speed_cap = int(args.lane_change_speed)
         self.full_steer_seconds = float(args.lane_change_full_steer_seconds)
         self.total_seconds = float(args.lane_change_total_seconds)
+        self.right_total_seconds = float(
+            args.lane_change_right_total_seconds
+        )
+        self.active_total_seconds = self.total_seconds
         self.steering_sign = float(args.steering_sign)
 
         self.active = False
@@ -420,6 +535,16 @@ class LaneChangeManeuver:
         )
         self.direction = -1.0 if moving_left else 1.0
         self.direction_name = "LEFT" if moving_left else "RIGHT"
+        self.active_max_steering = (
+            self.max_steering
+            if moving_left
+            else self.right_max_steering
+        )
+        self.active_total_seconds = (
+            self.total_seconds
+            if moving_left
+            else self.right_total_seconds
+        )
         self.target_lane = target_lane
         self.started_at = now
         self.active = True
@@ -429,13 +554,17 @@ class LaneChangeManeuver:
             f"steering={self.steering_command:+.2f}, "
             f"speed_cap={self.speed_cap}, "
             f"full_steer={self.full_steer_seconds:.2f}s, "
-            f"total={self.total_seconds:.2f}s",
+            f"total={self.active_total_seconds:.2f}s",
             flush=True,
         )
 
     @property
     def steering_command(self) -> float:
-        return self.direction * self.max_steering * self.steering_sign
+        return (
+            self.direction
+            * self.active_max_steering
+            * self.steering_sign
+        )
 
     def cancel(self, reason: str | None = None) -> None:
         if self.active and reason:
@@ -456,7 +585,7 @@ class LaneChangeManeuver:
             return base_steering, base_speed
 
         elapsed = now - self.started_at
-        if elapsed >= self.total_seconds:
+        if elapsed >= self.active_total_seconds:
             print(
                 f"LANE CHANGE COMPLETE: target={self.target_lane.name if self.target_lane else 'UNKNOWN'}",
                 flush=True,
@@ -478,7 +607,11 @@ class LaneChangeManeuver:
     def remaining_seconds(self, now: float) -> float:
         if not self.active:
             return 0.0
-        return max(0.0, self.total_seconds - (now - self.started_at))
+        return max(
+            0.0,
+            self.active_total_seconds
+            - (now - self.started_at),
+        )
 
 
 def main() -> None:
@@ -492,10 +625,10 @@ def main() -> None:
         model=model,
         imgsz=args.imgsz,
         device=args.device,
-        min_area=120,
+        min_area=args.obstacle_car_min_area,
         corridor_center_ratio=args.vehicle_x_ratio,
         corridor_width_ratio=0.36,
-        blocked_bottom_ratio=0.58,      
+        blocked_bottom_ratio=0.58,
     )
 
     capture = open_camera(args.camera, args.width, args.height, args.camera_fps)
@@ -592,7 +725,7 @@ def main() -> None:
         initial_lane=current_lane,
         obstacle_distance_cm=200,
         clear_distance_cm=250,
-        detection_confirm_frames=3,
+        detection_confirm_frames=2,
         clear_confirm_frames=10,
     )
 
@@ -609,8 +742,20 @@ def main() -> None:
     previous_time = time.perf_counter()
     fps = 0.0
     driving_enabled = False
-    previous_final_steering = 0.0
-    left_corner_started_at = None
+    obstacle_lane_memory = {
+        DrivingLane.LANE_1: None,
+        DrivingLane.LANE_2: None,
+    }
+    cached_car_result = None
+    last_obstacle_analysis_time = float("-inf")
+    last_avoidance_command = None
+    obstacle_auto_disabled_for_traffic_light = False
+    require_ultrasonic_after_lane_1_change = False
+    obstacle_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="obstacle-analysis",
+    )
+    obstacle_analysis_future: Future | None = None
     print(
         "Controls: SPACE=start/stop, 1/2=select lane, "
         "B=toggle obstacle, I=toggle intersection, "
@@ -639,30 +784,6 @@ def main() -> None:
                 force_size=not args.no_force_size,
             )
 
-            corner_check_now = time.perf_counter()
-            left_corner_candidate = (
-                driving_enabled
-                and obstacle_enabled
-                and current_lane == DrivingLane.LANE_2
-                and not lane_change.active
-                and previous_final_steering <= -0.35
-            )
-
-            if left_corner_candidate:
-                if left_corner_started_at is None:
-                    left_corner_started_at = corner_check_now
-            else:
-                left_corner_started_at = None
-
-            left_corner_obstacle_mode = (
-                left_corner_started_at is not None
-                and (
-                    corner_check_now
-                    - left_corner_started_at
-                    >= args.left_corner_obstacle_confirm_seconds
-                )
-            )
-
             results = model.predict(
                 source=frame,
                 imgsz=args.imgsz,
@@ -674,30 +795,11 @@ def main() -> None:
             raw_class_map = semantic_to_class_map(results[0].semantic_mask, frame.shape[:2])
             
             car_result = (
-                car_inference.from_class_map(
-                    raw_class_map,
-                    # On the fixed lane-2 left corner, search toward the
-                    # inside-left path without including the participant
-                    # vehicle area outside the track on the right.
-                    corridor_left_ratio=(
-                        0.05
-                        if left_corner_obstacle_mode
-                        else None
-                    ),
-                    corridor_right_ratio=(
-                        0.50
-                        if left_corner_obstacle_mode
-                        else None
-                    ),
-                    blocked_bottom_ratio=(
-                        0.45
-                        if left_corner_obstacle_mode
-                        else None
-                    ),
-                )
+                cached_car_result
                 if obstacle_enabled
                 else None
             )
+            obstacle_sample_ready = False
             if postprocess_config is not None:
                 processed_class_map = postprocess_class_map(raw_class_map, postprocess_config)
             else:
@@ -724,6 +826,33 @@ def main() -> None:
             )
 
             if (
+                traffic_light_visible
+                and obstacle_enabled
+                and not obstacle_auto_disabled_for_traffic_light
+            ):
+                obstacle_enabled = False
+                obstacle_auto_disabled_for_traffic_light = True
+                obstacle_avoidance.reset(
+                    current_lane
+                )
+                lane_change.cancel(
+                    "traffic light detected"
+                )
+                cached_car_result = None
+                last_avoidance_command = None
+                if obstacle_analysis_future is not None:
+                    obstacle_analysis_future.cancel()
+                    obstacle_analysis_future = None
+                last_obstacle_analysis_time = float(
+                    "-inf"
+                )
+                print(
+                    "Obstacle detection/avoidance: "
+                    "AUTO OFF after traffic light detection.",
+                    flush=True,
+                )
+
+            if (
                 intersection_enabled
                 and intersection_controller.requires_stop_line
             ):
@@ -742,11 +871,121 @@ def main() -> None:
                 control_class_map,
             )
 
+            if obstacle_enabled:
+                obstacle_lane_now = time.perf_counter()
+
+                if (
+                    obstacle_analysis_future is not None
+                    and obstacle_analysis_future.done()
+                ):
+                    cached_car_result = (
+                        obstacle_analysis_future.result()
+                    )
+                    car_result = cached_car_result
+                    obstacle_analysis_future = None
+                    obstacle_sample_ready = True
+
+                for lane_key, curve in (
+                    (
+                        DrivingLane.LANE_1,
+                        lanes.center,
+                    ),
+                    (
+                        DrivingLane.LANE_2,
+                        lanes.right,
+                    ),
+                ):
+                    if curve.valid:
+                        obstacle_lane_memory[
+                            lane_key
+                        ] = (
+                            curve,
+                            obstacle_lane_now,
+                        )
+
+                current_curve = (
+                    lanes.center
+                    if current_lane == DrivingLane.LANE_1
+                    else lanes.right
+                )
+                lane_reference_for_obstacle = (
+                    current_curve
+                    if current_curve.valid
+                    else None
+                )
+                remembered_curve = (
+                    obstacle_lane_memory[
+                        current_lane
+                    ]
+                )
+                if (
+                    lane_reference_for_obstacle is None
+                    and remembered_curve is not None
+                    and (
+                        obstacle_lane_now
+                        - remembered_curve[1]
+                        <= args.obstacle_lane_memory_seconds
+                    )
+                ):
+                    lane_reference_for_obstacle = (
+                        remembered_curve[0]
+                    )
+                lane_offset_for_obstacle = (
+                    args.center_offset_ratio
+                    if current_lane == DrivingLane.LANE_1
+                    else args.right_offset_ratio
+                )
+                obstacle_period = (
+                    1.0
+                    / args.obstacle_analysis_hz
+                )
+                if (
+                    obstacle_analysis_future is None
+                    and (
+                        obstacle_lane_now
+                        - last_obstacle_analysis_time
+                        >= obstacle_period
+                    )
+                ):
+                    obstacle_analysis_future = (
+                        obstacle_executor.submit(
+                            car_inference.from_class_map,
+                            raw_class_map.copy(),
+                            lane_reference=(
+                                lane_reference_for_obstacle
+                            ),
+                            lane_offset_ratio=(
+                                lane_offset_for_obstacle
+                            ),
+                            near_y_ratio=args.near_y_ratio,
+                            vanishing_y_ratio=(
+                                args.vanishing_y_ratio
+                            ),
+                            path_half_width_ratio=(
+                                args.obstacle_path_half_width_ratio
+                            ),
+                            path_min_perspective_scale=(
+                                args.obstacle_path_min_scale
+                            ),
+                            road_margin_ratio=(
+                                args.obstacle_road_margin_ratio
+                            ),
+                            blocked_bottom_ratio=(
+                                args.obstacle_min_bottom_ratio
+                            ),
+                        )
+                    )
+                    last_obstacle_analysis_time = (
+                        obstacle_lane_now
+                    )
+
             # ---------------------------------------------------------
             # Obstacle avoidance
             # ---------------------------------------------------------
 
-            avoidance_command = None
+            avoidance_command = (
+                last_avoidance_command
+            )
 
             # Arduino가 전송한 최신 초음파 거리 가져오기
             distance_data = (
@@ -778,6 +1017,10 @@ def main() -> None:
                 driving_enabled
                 and obstacle_enabled
                 and intersection_controller.allows_obstacle_avoidance
+                and (
+                    obstacle_sample_ready
+                    or mock_front_blocked
+                )
                 # and not stop_line_detection.should_stop
             ):
                 previous_lane = current_lane
@@ -785,12 +1028,30 @@ def main() -> None:
                 avoidance_command = obstacle_avoidance.update(
                     front_blocked=front_blocked,
                     center_distance_cm=center_distance_cm,
-                    allow_vision_only=left_corner_obstacle_mode,
+                    # Normal avoidance is vision-only. After completing a
+                    # LANE_2 -> LANE_1 maneuver, the next avoidance requires
+                    # both the current-lane visual obstacle and a fresh,
+                    # close center-ultrasonic reading.
+                    allow_vision_only=(
+                        not require_ultrasonic_after_lane_1_change
+                    ),
+                )
+                last_avoidance_command = (
+                    avoidance_command
                 )
 
-                current_lane = avoidance_command.target_lane
-
                 if avoidance_command.lane_change_requested:
+                    if (
+                        require_ultrasonic_after_lane_1_change
+                        and previous_lane == DrivingLane.LANE_1
+                        and avoidance_command.target_lane
+                        == DrivingLane.LANE_2
+                    ):
+                        require_ultrasonic_after_lane_1_change = False
+
+                    current_lane = (
+                        avoidance_command.target_lane
+                    )
                     follower.reset()
                     lane_detector.reset()
                     lane_change.start(
@@ -802,7 +1063,6 @@ def main() -> None:
                         "Obstacle detected: "
                         f"car={avoidance_command.front_blocked}, "
                         f"distance={avoidance_command.center_distance_cm}cm, "
-                        f"left_corner={left_corner_obstacle_mode}, "
                         f"{previous_lane.name} -> {current_lane.name}",
                         flush=True,
                     )
@@ -892,6 +1152,11 @@ def main() -> None:
                 lane_change.cancel("intersection or stop command has priority")
             elif lane_change_allowed:
                 lane_change_was_active = lane_change.active
+                completed_lane_change_direction = (
+                    lane_change.direction_name
+                    if lane_change.active
+                    else "NONE"
+                )
 
                 final_steering, final_speed = lane_change.apply(
                     now=command_now,
@@ -909,6 +1174,17 @@ def main() -> None:
                         current_lane
                     )
 
+                    if (
+                        completed_lane_change_direction == "LEFT"
+                        and current_lane == DrivingLane.LANE_1
+                    ):
+                        require_ultrasonic_after_lane_1_change = True
+                        print(
+                            "LANE_1 obstacle recheck: "
+                            "camera + ultrasonic confirmation required.",
+                            flush=True,
+                        )
+
                     print(
                         "Lane change completed. "
                         "Obstacle detection re-armed immediately.",
@@ -921,8 +1197,6 @@ def main() -> None:
                     final_speed,
                     immediate=intersection_control.entered_waiting,
                 )
-
-            previous_final_steering = final_steering
 
             # if driving_enabled and arduino.enabled:
             #     arduino.update_command(control.steering, control.speed)
@@ -950,22 +1224,17 @@ def main() -> None:
                         intersection_control,
                     )
 
-                if obstacle_enabled:
+                if (
+                    obstacle_enabled
+                    and car_result is not None
+                ):
                     draw_obstacle_debug(
                         preview,
                         car_result,
                         distance_data,
                         avoidance_command,
-                        corridor_center_ratio=(
-                            0.275
-                            if left_corner_obstacle_mode
-                            else args.vehicle_x_ratio
-                        ),
-                        corridor_width_ratio=(
-                            0.45
-                            if left_corner_obstacle_mode
-                            else 0.36
-                        ),
+                        corridor_center_ratio=args.vehicle_x_ratio,
+                        corridor_width_ratio=0.36,
                         obstacle_distance_cm=200,
                         clear_distance_cm=250,
                         display_max_cm=250,
@@ -1080,6 +1349,9 @@ def main() -> None:
                     previous_lane = current_lane
                     current_lane = requested_lane
 
+                    if current_lane == DrivingLane.LANE_2:
+                        require_ultrasonic_after_lane_1_change = False
+
                     # 수동으로 선택한 차선을 장애물 회피 제어기에도 즉시 반영
                     obstacle_avoidance.reset(current_lane)
 
@@ -1125,6 +1397,14 @@ def main() -> None:
                 obstacle_enabled = not obstacle_enabled
                 obstacle_avoidance.reset(current_lane)
                 lane_change.cancel("obstacle feature toggled")
+                cached_car_result = None
+                last_avoidance_command = None
+                if obstacle_analysis_future is not None:
+                    obstacle_analysis_future.cancel()
+                    obstacle_analysis_future = None
+                last_obstacle_analysis_time = float(
+                    "-inf"
+                )
                 print(
                     "Obstacle detection/avoidance: "
                     f"{'ON' if obstacle_enabled else 'OFF'}",
@@ -1145,6 +1425,9 @@ def main() -> None:
         pass
     finally:
         # Stop the car before releasing the camera or closing the serial port.
+        obstacle_executor.shutdown(
+            wait=False
+        )
         arduino.emergency_stop()
         arduino.close()
         reader.stop()

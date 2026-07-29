@@ -10,7 +10,7 @@ from serial import SerialException
 
 
 # Connection settings
-PORT = "COM6"
+PORT = "COM8"
 BAUD = 115200
 
 SEND_INTERVAL = 0.05  # 50ms

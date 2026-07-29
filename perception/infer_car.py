@@ -25,9 +25,11 @@ import cv2
 import numpy as np
 
 from perception.infer_sem_class import (
+    CLASS_TO_ID,
     load_semantic_model,
     semantic_to_class_map,
 )
+from perception.lane_detector import LaneCurve
 
 
 # Semantic model의 car 클래스 번호
@@ -58,6 +60,15 @@ class CarDetection:
     # 현재 차량이 전방 경로를 막는다고 판단됐는지
     blocks_path: bool
 
+    # 복원된 semantic 주 도로 영역 안에 있는지
+    on_road: bool
+
+    # 현재 추종 차선의 가상 중심 영역 안에 있는지
+    in_current_lane: bool
+
+    # 차량 하단 중심과 가상 주행 중심 사이의 영상 너비 대비 거리
+    path_error_ratio: float
+
 
 @dataclass(frozen=True)
 class CarInferenceResult:
@@ -65,6 +76,8 @@ class CarInferenceResult:
 
     # 전체 semantic class map
     class_map: np.ndarray
+
+    mask: np.ndarray
 
     # car 클래스만 추출한 이진 마스크
     mask: np.ndarray
@@ -74,6 +87,12 @@ class CarInferenceResult:
 
     # 영상 기준 전방 경로에 차량이 있는지
     front_blocked: bool
+
+    road_mask: np.ndarray
+
+    # 차량 가림을 채워 복원한 주 도로와 현재 차선 마스크
+    road_mask: np.ndarray
+    current_lane_mask: np.ndarray
 
 
 class CarInference:
@@ -260,6 +279,13 @@ class CarInference:
         self,
         class_map: np.ndarray,
         *,
+        lane_reference: Optional[LaneCurve] = None,
+        lane_offset_ratio: Optional[float] = None,
+        near_y_ratio: float = 0.84,
+        vanishing_y_ratio: float = 0.31,
+        path_half_width_ratio: float = 0.13,
+        path_min_perspective_scale: float = 0.40,
+        road_margin_ratio: float = 0.025,
         corridor_left_ratio: Optional[float] = None,
         corridor_right_ratio: Optional[float] = None,
         blocked_bottom_ratio: Optional[float] = None,
@@ -331,11 +357,229 @@ class CarInference:
                 "blocked_bottom_ratio must be in [0, 1]"
             )
 
+        if lane_offset_ratio is not None and lane_offset_ratio < 0.0:
+            raise ValueError(
+                "lane_offset_ratio must be non-negative"
+            )
+
+        if not 0.0 < path_half_width_ratio <= 0.5:
+            raise ValueError(
+                "path_half_width_ratio must be in (0, 0.5]"
+            )
+
+        if not 0.0 < path_min_perspective_scale <= 1.0:
+            raise ValueError(
+                "path_min_perspective_scale must be in (0, 1]"
+            )
+
+        if not 0.0 <= road_margin_ratio <= 0.25:
+            raise ValueError(
+                "road_margin_ratio must be in [0, 0.25]"
+            )
+
+        if near_y_ratio <= vanishing_y_ratio:
+            raise ValueError(
+                "near_y_ratio must be greater than vanishing_y_ratio"
+            )
+
         # car 클래스만 255로 설정한 이진 마스크
         mask = (
             (class_map == CAR_CLASS_ID)
             .astype(np.uint8)
             * 255
+        )
+
+        corridor_left = (
+            width
+            * resolved_corridor_left_ratio
+        )
+        corridor_right = (
+            width
+            * resolved_corridor_right_ratio
+        )
+
+        # Build the competition track from the learned semantic surface
+        # classes. RETR_EXTERNAL + filled contour restores holes where a car
+        # occludes the road class.
+        drivable_mask = np.isin(
+            class_map,
+            np.array(
+                [
+                    CLASS_TO_ID["road"],
+                    CLASS_TO_ID["lane_left"],
+                    CLASS_TO_ID["lane_center"],
+                    CLASS_TO_ID["lane_right"],
+                    CLASS_TO_ID["stop_line"],
+                ],
+                dtype=class_map.dtype,
+            ),
+        ).astype(np.uint8)
+
+        close_size = max(
+            3,
+            int(round(width * 0.015)),
+        )
+        if close_size % 2 == 0:
+            close_size += 1
+
+        closed_drivable = cv2.morphologyEx(
+            drivable_mask,
+            cv2.MORPH_CLOSE,
+            cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (close_size, close_size),
+            ),
+        )
+        road_contours, _ = cv2.findContours(
+            closed_drivable,
+            cv2.RETR_EXTERNAL,
+            cv2.CHAIN_APPROX_SIMPLE,
+        )
+        road_mask = np.zeros(
+            (height, width),
+            dtype=np.uint8,
+        )
+        if road_contours:
+            main_road_contour = max(
+                road_contours,
+                key=cv2.contourArea,
+            )
+            cv2.drawContours(
+                road_mask,
+                [main_road_contour],
+                -1,
+                255,
+                thickness=-1,
+            )
+
+        # Small far-field gaps in the road class should not cut off the
+        # virtual lane path. Expand only the selected main road component,
+        # rather than accepting unrelated road-like regions elsewhere.
+        road_margin = int(
+            round(
+                width
+                * road_margin_ratio
+            )
+        )
+        if road_margin > 0:
+            margin_size = (
+                road_margin * 2
+                + 1
+            )
+            road_mask = cv2.dilate(
+                road_mask,
+                cv2.getStructuringElement(
+                    cv2.MORPH_ELLIPSE,
+                    (
+                        margin_size,
+                        margin_size,
+                    ),
+                ),
+            )
+
+        # Use the same perspective-scaled offset as the lane follower:
+        # lane 1 follows left of lane_center, lane 2 follows left of
+        # lane_right. This produces a curved virtual path without assigning
+        # lanes from fixed screen coordinates.
+        current_lane_mask = np.zeros_like(
+            road_mask
+        )
+        path_centers = np.full(
+            height,
+            np.nan,
+            dtype=np.float64,
+        )
+
+        if (
+            lane_reference is not None
+            and lane_reference.valid
+            and lane_reference.coefficients is not None
+            and lane_offset_ratio is not None
+        ):
+            denominator = (
+                near_y_ratio
+                - vanishing_y_ratio
+            )
+
+            y_ratios = (
+                np.arange(
+                    height,
+                    dtype=np.float64,
+                )
+                / max(height - 1, 1)
+            )
+            boundary_xs = np.polyval(
+                lane_reference.coefficients,
+                y_ratios,
+            )
+            perspective_scales = np.clip(
+                (
+                    y_ratios
+                    - vanishing_y_ratio
+                )
+                / denominator,
+                0.08,
+                1.25,
+            )
+            path_centers = (
+                boundary_xs
+                - width
+                * float(lane_offset_ratio)
+                * perspective_scales
+            )
+            width_scales = np.maximum(
+                path_min_perspective_scale,
+                perspective_scales,
+            )
+            half_widths = np.maximum(
+                width * 0.02,
+                width
+                * path_half_width_ratio
+                * width_scales,
+            )
+            x_coordinates = np.arange(
+                width,
+                dtype=np.float64,
+            )[None, :]
+            current_lane_mask[
+                (
+                    x_coordinates
+                    >= (
+                        path_centers
+                        - half_widths
+                    )[:, None]
+                )
+                & (
+                    x_coordinates
+                    <= (
+                        path_centers
+                        + half_widths
+                    )[:, None]
+                )
+            ] = 255
+        else:
+            fallback_left = int(
+                np.clip(
+                    round(corridor_left),
+                    0,
+                    width - 1,
+                )
+            )
+            fallback_right = int(
+                np.clip(
+                    round(corridor_right),
+                    0,
+                    width - 1,
+                )
+            )
+            current_lane_mask[
+                :,
+                fallback_left:fallback_right + 1,
+            ] = 255
+
+        current_lane_mask = cv2.bitwise_and(
+            current_lane_mask,
+            road_mask,
         )
 
         # 서로 연결된 차량 픽셀을 개별 영역으로 분리
@@ -348,16 +592,6 @@ class CarInference:
 
         # 주행 경로 영역 계산. 일반 주행은 생성자 기본값을 사용하고,
         # 고정 트랙의 특수 코너에서는 호출자가 비대칭 영역을 지정한다.
-        corridor_left = (
-            width
-            * resolved_corridor_left_ratio
-        )
-
-        corridor_right = (
-            width
-            * resolved_corridor_right_ratio
-        )
-
         detections: list[CarDetection] = []
 
         # label 0은 배경이므로 1부터 시작
@@ -382,23 +616,54 @@ class CarInference:
             if area < self.min_area:
                 continue
 
-            right = x + box_width
             bottom = y + box_height
-
-            # 차량 bounding box가 전방 corridor와 겹치는지
-            overlaps_corridor = (
-                right >= corridor_left
-                and x <= corridor_right
-            )
 
             # 차량 bounding box 하단의 이미지 높이 비율
             bottom_y_ratio = (
                 bottom / height
             )
 
+            anchor_x = int(
+                np.clip(
+                    round(x + box_width * 0.5),
+                    0,
+                    width - 1,
+                )
+            )
+            anchor_y = int(
+                np.clip(
+                    bottom - 1,
+                    0,
+                    height - 1,
+                )
+            )
+            on_road = bool(
+                road_mask[
+                    anchor_y,
+                    anchor_x,
+                ]
+            )
+            in_current_lane = bool(
+                current_lane_mask[
+                    anchor_y,
+                    anchor_x,
+                ]
+            )
+
+            path_center = path_centers[
+                anchor_y
+            ]
+            path_error_ratio = (
+                abs(anchor_x - path_center)
+                / max(width, 1)
+                if np.isfinite(path_center)
+                else float("inf")
+            )
+
             # 영상 기준 전방 경로를 막는 차량인지 판단
             blocks_path = (
-                overlaps_corridor
+                on_road
+                and in_current_lane
                 and bottom_y_ratio
                 >= resolved_blocked_bottom_ratio
             )
@@ -428,6 +693,11 @@ class CarInference:
                         bottom_y_ratio
                     ),
                     blocks_path=blocks_path,
+                    on_road=on_road,
+                    in_current_lane=in_current_lane,
+                    path_error_ratio=float(
+                        path_error_ratio
+                    ),
                 )
             )
 
@@ -447,6 +717,8 @@ class CarInference:
                 detection.blocks_path
                 for detection in detections
             ),
+            road_mask=road_mask,
+            current_lane_mask=current_lane_mask,
         )
 
     @staticmethod

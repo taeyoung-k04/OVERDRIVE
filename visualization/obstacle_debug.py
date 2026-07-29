@@ -142,26 +142,7 @@ def draw_obstacle_debug(
     # Visual forward corridor
     # -----------------------------------------------------------------
 
-    corridor_half = width * corridor_width_ratio * 0.5
-    corridor_center = width * corridor_center_ratio
-
-    corridor_left = int(
-        np.clip(
-            round(corridor_center - corridor_half),
-            0,
-            width - 1,
-        )
-    )
-    corridor_right = int(
-        np.clip(
-            round(corridor_center + corridor_half),
-            0,
-            width - 1,
-        )
-    )
-
     corridor_top = int(round(height * 0.18))
-    corridor_bottom = height - 1
 
     corridor_color = (
         (0, 0, 255)
@@ -170,13 +151,11 @@ def draw_obstacle_debug(
     )
 
     overlay = preview.copy()
-    cv2.rectangle(
-        overlay,
-        (corridor_left, corridor_top),
-        (corridor_right, corridor_bottom),
-        corridor_color,
-        -1,
+    lane_mask = (
+        car_result.current_lane_mask
+        > 0
     )
+    overlay[lane_mask] = corridor_color
     cv2.addWeighted(
         overlay,
         0.09,
@@ -186,19 +165,24 @@ def draw_obstacle_debug(
         preview,
     )
 
-    cv2.rectangle(
+    lane_contours, _ = cv2.findContours(
+        car_result.current_lane_mask,
+        cv2.RETR_EXTERNAL,
+        cv2.CHAIN_APPROX_SIMPLE,
+    )
+    cv2.drawContours(
         preview,
-        (corridor_left, corridor_top),
-        (corridor_right, corridor_bottom),
+        lane_contours,
+        -1,
         corridor_color,
         2,
     )
 
     cv2.putText(
         preview,
-        "CAR CORRIDOR",
+        "CURRENT LANE OBSTACLE PATH",
         (
-            max(6, corridor_left + 6),
+            8,
             min(height - 8, corridor_top + 20),
         ),
         cv2.FONT_HERSHEY_SIMPLEX,
@@ -223,7 +207,18 @@ def draw_obstacle_debug(
         box_color = (
             (0, 0, 255)
             if detection.blocks_path
-            else (255, 0, 255)
+            else (
+                (255, 0, 255)
+                if (
+                    detection.on_road
+                    and detection.in_current_lane
+                )
+                else (
+                    (255, 180, 0)
+                    if detection.on_road
+                    else (130, 130, 130)
+                )
+            )
         )
 
         cv2.rectangle(
@@ -249,7 +244,9 @@ def draw_obstacle_debug(
         label = (
             f"CAR{index} "
             f"A={detection.area} "
-            f"B={detection.bottom_y_ratio:.2f}"
+            f"B={detection.bottom_y_ratio:.2f} "
+            f"ROAD={int(detection.on_road)} "
+            f"LANE={int(detection.in_current_lane)}"
         )
 
         text_size, _ = cv2.getTextSize(

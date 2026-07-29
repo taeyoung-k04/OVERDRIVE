@@ -26,7 +26,7 @@
 
   "safety_margin_m": 0.055,
 
-  "expected_slot_width_m": 0.95,
+  "expected_slot_width_m": 0.65,
   "slot_width_tolerance_m": 0.10,
   "slot_depth_m": 1.55,
   //장애물 중심 기준 들어간 정도

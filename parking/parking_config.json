@@ -1,0 +1,48 @@
+{
+  "arduino_port": "COM6",
+  "arduino_baud": 115200,
+  "lidar_port": "COM7",
+  "lidar_baud": 115200,
+
+  // 뒷차축으로 거리
+  "lidar_x_m": -0.25,
+  "lidar_y_m": 0.0,
+  //LiDAR의 0도 방향이 차량 뒤쪽을 향하면
+  "lidar_yaw_deg": 180.0,
+
+  "lidar_clockwise_angles": false,
+  "lidar_angle_offset_deg": 0.0,
+
+  //뒷바퀴 차축 중심에서 앞바퀴 차축 중심까지의 거리
+  "wheelbase_m": 0.55,
+
+  "vehicle_length_m": 0.95,
+  "vehicle_width_m": 0.40,
+
+  //뒷차축 중심에서 차량 최후방까지의 거리야.
+  "rear_axle_to_rear_m": 0.30,
+  
+  "max_steering_deg": 29.0,
+
+  "safety_margin_m": 0.055,
+
+  "expected_slot_width_m": 0.95,
+  "slot_width_tolerance_m": 0.10,
+  "slot_depth_m": 1.55,
+  //장애물 중심 기준 들어간 정도
+  "goal_depth_from_car_centers_m": -0.45,
+
+  "forward_speed_mps": 0.28,
+  "reverse_speed_mps": 0.22,
+  "forward_pwm": 185,
+  "reverse_pwm": -185,
+
+  "exit_forward_m": 2.0,
+  "exit_lateral_m": 0.0,
+  "exit_yaw_offset_deg": 0.0,
+
+  "stop_clearance_m": 0.17,
+  "goal_hold_s": 3.5,
+  "dry_run": false,
+  "save_debug_npz": "parking_debug.npz"
+}

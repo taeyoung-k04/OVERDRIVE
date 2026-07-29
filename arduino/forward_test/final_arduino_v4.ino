@@ -14,7 +14,11 @@
     C,<steering>,<drive_pwm>\n
       steering : -1000 .. +1000
                  -1000 = left, 0 = center, +1000 = right
-      drive_pwm: 0 .. 255, forward only
+
+      drive_pwm: -255 .. +255
+                 negative = reverse
+                 0        = stop
+                 positive = forward
 
     X\n       : stop immediately
     Q\n       : print status once
@@ -31,8 +35,9 @@
     The left target range uses up to -980 instead of -900.
 
   Drive-speed compensation
-    Incoming drive PWM is multiplied by 1.25, with a minimum effective
-    PWM of 90 and a maximum safety cap of 220.
+    The magnitude of the incoming drive PWM is multiplied by 1.25,
+    with a minimum effective PWM of 90 and a maximum safety cap of 220.
+    Positive PWM drives forward and negative PWM drives backward.
 
   IMPORTANT
     1. Lift the wheels off the floor for the first steering test.
@@ -61,6 +66,23 @@ const uint8_t STEERING_2 = 9;      // brown
 
 const uint8_t STEERING_POT_PIN = A0;
 
+// -----------------------------------------------------------------------------
+// Ultrasonic sensor configuration
+// -----------------------------------------------------------------------------
+
+// Center ultrasonic sensor
+const uint8_t CENTER_TRIG = 2;
+const uint8_t CENTER_ECHO = 4;
+
+// Python can use the reported center distance to begin a lane change around
+// 150 cm. Arduino itself only performs the final emergency forward stop.
+const int OBSTACLE_EMERGENCY_STOP_DISTANCE_CM = 25;
+
+// Center ultrasonic sensor sampling interval.
+const unsigned long ULTRASONIC_INTERVAL_MS = 25;
+const unsigned long ULTRASONIC_TIMEOUT_US = 12000;
+const unsigned long ULTRASONIC_REPORT_INTERVAL_MS = 100;
+
 // Change only when the physical motor direction is reversed.
 const bool INVERT_STEERING_MOTOR = false;
 
@@ -78,9 +100,9 @@ const bool SERIAL_MONITOR_TEST_MODE = false;
 
 const bool STEERING_CALIBRATED = true;
 
-const int POT_LEFT_RAW = 471; //462 455 458 480
-const int POT_CENTER_RAW = 393; //400 396 394 400
-const int POT_RIGHT_RAW = 319; //317 313 312 320
+const int POT_LEFT_RAW = 470; //462 455 458 480
+const int POT_CENTER_RAW = 396; //400 396 394 400
+const int POT_RIGHT_RAW = 320; //317 313 312 320
 
 // Separate steering limits. The left side is allowed to use more of its
 // calibrated range because the measured left travel is relatively small.
@@ -185,6 +207,13 @@ int steeringProgressReference = 0;
 int steeringDirectionReference = 0;
 int directionCheckRequestedDirection = 0;
 
+// Center ultrasonic distance in centimeters. -1 means no valid echo.
+int centerDistanceCm = -1;
+
+bool obstacleEmergencyStop = false;
+unsigned long lastUltrasonicTime = 0;
+unsigned long lastUltrasonicReportTime = 0;
+
 const size_t RX_BUFFER_SIZE = 64;
 char rxBuffer[RX_BUFFER_SIZE];
 size_t rxLength = 0;
@@ -285,7 +314,7 @@ int applySteeringCommandCompensation(int command)
 {
   command = constrain(command, -1000, 1000);
 
-    // Python에서 최대 조향을 요청하면 그대로 최대 목표 사용
+  // Python에서 최대 조향을 요청하면 그대로 최대 목표 사용
   if (command <= -1000) {
     return -LEFT_STEERING_TARGET_LIMIT;
   }
@@ -305,42 +334,60 @@ int applySteeringCommandCompensation(int command)
 
 int calculateAppliedDrivePwm(int requestedPwm)
 {
-  requestedPwm = constrain(requestedPwm, 0, 255);
+  requestedPwm = constrain(requestedPwm, -255, 255);
 
   if (requestedPwm == 0) {
     return 0;
   }
 
-  int boosted = (int)round((float)requestedPwm * DRIVE_PWM_GAIN);
+  const int driveDirection = requestedPwm > 0 ? 1 : -1;
+  const int requestedMagnitude = abs(requestedPwm);
+
+  int boosted =
+    (int)round((float)requestedMagnitude * DRIVE_PWM_GAIN);
 
   if (DRIVE_MIN_EFFECTIVE_PWM > 0) {
     boosted = max(boosted, DRIVE_MIN_EFFECTIVE_PWM);
   }
 
-  return constrain(boosted, 0, DRIVE_MAX_PWM);
+  boosted = constrain(boosted, 0, DRIVE_MAX_PWM);
+
+  return driveDirection * boosted;
 }
 
 // -----------------------------------------------------------------------------
 // Drive motor helpers
 // -----------------------------------------------------------------------------
 
-void driveMotorForward(uint8_t in1, uint8_t in2, int pwm, bool inverted)
+void driveMotorSigned(
+  uint8_t in1,
+  uint8_t in2,
+  int signedPwm,
+  bool inverted
+)
 {
-  pwm = constrain(pwm, 0, 255);
+  signedPwm = constrain(signedPwm, -255, 255);
 
-  if (pwm == 0) {
+  if (signedPwm == 0) {
     analogWrite(in1, 0);
     analogWrite(in2, 0);
     return;
   }
 
+  const int pwm = abs(signedPwm);
+  bool forward = signedPwm > 0;
+
   if (inverted) {
-    analogWrite(in1, pwm);
-    analogWrite(in2, 0);
+    forward = !forward;
   }
-  else {
+
+  if (forward) {
     analogWrite(in1, 0);
     analogWrite(in2, pwm);
+  }
+  else {
+    analogWrite(in1, pwm);
+    analogWrite(in2, 0);
   }
 }
 
@@ -352,21 +399,21 @@ void driveStop()
   analogWrite(RIGHT_MOTOR_2, 0);
 }
 
-void driveForward(int pwm)
+void driveSigned(int signedPwm)
 {
-  pwm = constrain(pwm, 0, 255);
+  signedPwm = constrain(signedPwm, -255, 255);
 
-  driveMotorForward(
+  driveMotorSigned(
     LEFT_MOTOR_1,
     LEFT_MOTOR_2,
-    pwm,
+    signedPwm,
     INVERT_LEFT_DRIVE_MOTOR
   );
 
-  driveMotorForward(
+  driveMotorSigned(
     RIGHT_MOTOR_1,
     RIGHT_MOTOR_2,
-    pwm,
+    signedPwm,
     INVERT_RIGHT_DRIVE_MOTOR
   );
 }
@@ -650,6 +697,68 @@ void updateSteeringClosedLoop()
 }
 
 // -----------------------------------------------------------------------------
+// Ultrasonic sensors
+// -----------------------------------------------------------------------------
+
+int readUltrasonicDistanceCm(uint8_t trigPin, uint8_t echoPin)
+{
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+
+  digitalWrite(trigPin, LOW);
+
+  const unsigned long duration = pulseIn(
+    echoPin,
+    HIGH,
+    ULTRASONIC_TIMEOUT_US
+  );
+
+  if (duration == 0) {
+    return -1;
+  }
+
+  return (int)(duration / 58UL);
+}
+
+void updateUltrasonicSensors()
+{
+  const unsigned long now = millis();
+
+  if (now - lastUltrasonicTime < ULTRASONIC_INTERVAL_MS) {
+    return;
+  }
+
+  lastUltrasonicTime = now;
+
+  centerDistanceCm = readUltrasonicDistanceCm(
+    CENTER_TRIG,
+    CENTER_ECHO
+  );
+
+  obstacleEmergencyStop =
+    centerDistanceCm > 0 &&
+    centerDistanceCm <= OBSTACLE_EMERGENCY_STOP_DISTANCE_CM;
+}
+
+void sendUltrasonicData()
+{
+  const unsigned long now = millis();
+
+  if (now - lastUltrasonicReportTime < ULTRASONIC_REPORT_INTERVAL_MS) {
+    return;
+  }
+
+  lastUltrasonicReportTime = now;
+
+  // Format consumed by Python: DIST,<center_cm>
+  Serial.print(F("DIST,"));
+  Serial.println(centerDistanceCm);
+}
+
+// -----------------------------------------------------------------------------
 // Commands, watchdog and status
 // -----------------------------------------------------------------------------
 
@@ -675,7 +784,7 @@ void acceptControlCommand(int steeringTarget, int drivePwm)
   const bool startingNewRun = !commandActive;
 
   targetSteeringCommand = constrain(steeringTarget, -1000, 1000);
-  targetDrivePwm = constrain(drivePwm, 0, 255);
+  targetDrivePwm = constrain(drivePwm, -255, 255);
 
   commandActive = true;
   lastCommandTime = millis();
@@ -819,10 +928,14 @@ void applyCommandWatchdog()
 
 void updateDrive()
 {
+  const bool forwardBlockedByObstacle =
+    obstacleEmergencyStop && targetDrivePwm > 0;
+
   if (
     !commandActive ||
-    targetDrivePwm <= 0 ||
+    targetDrivePwm == 0 ||
     steeringFault ||
+    forwardBlockedByObstacle ||
     !STEERING_CALIBRATED ||
     !calibrationLooksValid()
   ) {
@@ -832,7 +945,7 @@ void updateDrive()
   }
 
   appliedDrivePwm = calculateAppliedDrivePwm(targetDrivePwm);
-  driveForward(appliedDrivePwm);
+  driveSigned(appliedDrivePwm);
 }
 
 void updateTelemetry()
@@ -865,6 +978,11 @@ void setup()
   pinMode(STEERING_2, OUTPUT);
   pinMode(STEERING_POT_PIN, INPUT);
 
+  pinMode(CENTER_TRIG, OUTPUT);
+  pinMode(CENTER_ECHO, INPUT);
+
+  digitalWrite(CENTER_TRIG, LOW);
+
   driveStop();
   steeringStop();
 
@@ -874,12 +992,14 @@ void setup()
   lastCommandTime = now;
   lastSteeringUpdate = now;
   lastTelemetryTime = now;
+  lastUltrasonicTime = now;
+  lastUltrasonicReportTime = now;
   steeringDirectionChangedAt = now;
   steeringProgressTime = now;
   steeringDirectionCheckTime = now;
 
   Serial.println(F("READY,LANE_FOLLOW_POT_CLOSED_LOOP_V3_LEFT_BOOST"));
-  Serial.println(F("PROTOCOL,C,<steering -1000..1000>,<drive 0..255>"));
+  Serial.println(F("PROTOCOL,C,<steering -1000..1000>,<drive -255..255>"));
   Serial.println(F("STOP,X"));
   Serial.println(F("STATUS,Q"));
 
@@ -903,6 +1023,8 @@ void loop()
 {
   readSerialCommands();
   applyCommandWatchdog();
+  updateUltrasonicSensors();
+  sendUltrasonicData();
   updateSteeringClosedLoop();
   updateDrive();
   updateTelemetry();

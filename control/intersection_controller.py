@@ -34,9 +34,11 @@ from perception.traffic_light_detector import (
 class IntersectionState(str, Enum):
     """High-level states for one stop-line/traffic-light interaction."""
 
-    CRUISE = "cruise"
+    SEARCHING_RED = "searching_red"
+    APPROACHING_STOP_LINE = "approaching_stop_line"
     WAITING_FOR_GREEN = "waiting_for_green"
-    CLEARING_STOP_LINE = "clearing_stop_line"
+    CLEARING_INTERSECTION = "clearing_intersection"
+    
 
 
 @dataclass(frozen=True)
@@ -53,9 +55,12 @@ class IntersectionControlOutput:
     # The runtime should run TrafficLightDetector only while this is true.
     traffic_light_required: bool
 
+    stop_line_required: bool = False
+
     # Reset TrafficLightDetector after this frame. This prevents an old stable
     # GREEN value from being reused at the next intersection.
     reset_traffic_light_detector: bool = False
+    reset_stop_line_detector: bool = False
 
     entered_waiting: bool = False
     released_on_green: bool = False
@@ -86,7 +91,7 @@ class IntersectionController:
         self,
         *,
         clear_confirm_frames: int = 8,
-        max_clearing_seconds: float = 3.0,
+        max_clearing_seconds: float = 10.0,
         minimum_green_confidence: float = 0.0,
         hold_steering_while_stopped: bool = True,
         departure_speed_cap: Optional[int] = None,
@@ -114,24 +119,36 @@ class IntersectionController:
             else int(departure_speed_cap)
         )
 
-        self.state = IntersectionState.CRUISE
+        self.state = IntersectionState.SEARCHING_RED
+        self._red_seen = False
         self._clear_frames = 0
         self._state_started_at = time.perf_counter()
         self._stopped_steering = 0.0
 
     @property
     def requires_traffic_light(self) -> bool:
-        """Whether the runtime should run traffic-light detection this frame."""
-        return self.state == IntersectionState.WAITING_FOR_GREEN
+        return self.state in {
+            IntersectionState.SEARCHING_RED,
+            IntersectionState.APPROACHING_STOP_LINE,
+            IntersectionState.WAITING_FOR_GREEN,
+        }
+
+    @property
+    def requires_stop_line(self) -> bool:
+        return self.state in {
+            IntersectionState.APPROACHING_STOP_LINE,
+            IntersectionState.CLEARING_INTERSECTION,
+        }
 
     @property
     def allows_obstacle_avoidance(self) -> bool:
         """Disable lane changes while waiting for or clearing an intersection."""
-        return self.state == IntersectionState.CRUISE
+        return self.state == IntersectionState.SEARCHING_RED
 
     def reset(self) -> None:
         """Return to normal lane-following state."""
-        self.state = IntersectionState.CRUISE
+        self.state = IntersectionState.SEARCHING_RED
+        self._red_seen = False
         self._clear_frames = 0
         self._state_started_at = time.perf_counter()
         self._stopped_steering = 0.0
@@ -144,24 +161,44 @@ class IntersectionController:
         self.state = new_state
         self._state_started_at = now
 
-        if new_state != IntersectionState.CLEARING_STOP_LINE:
-            self._clear_frames = 0
+        # if new_state != IntersectionState.CLEARING_STOP_LINE:
+        #     self._clear_frames = 0
 
     @staticmethod
-    def _stop_line_observed(
-        detection: StopLineDetection,
+    def _signal_confirmed(
+        detection: Optional[TrafficLightDetection],
+        expected: TrafficLightState,
+        *,
+        visible: bool,
+        minimum_confidence: float,
     ) -> bool:
-        """Return current-frame line presence.
+        return bool(
+            visible
+            and detection is not None
+            and detection.observed_state == expected
+            and detection.stable_state == expected
+            and detection.confidence >= minimum_confidence
+        )
+    
+    @staticmethod
+    def _stop_line_observed(
+        detection: Optional[StopLineDetection],
+    ) -> bool:
+        if detection is None:
+            return False
 
-        The project's full detector uses ``observed``. The ``getattr`` fallback
-        also keeps this controller compatible with an earlier minimal detector
-        that used the field name ``detected``.
-        """
-        observed = getattr(detection, "observed", None)
+        observed = getattr(
+            detection,
+            "observed",
+            None,
+        )
+
         if observed is not None:
             return bool(observed)
-        return bool(getattr(detection, "detected", False))
 
+        return bool(
+            getattr(detection, "detected", False)
+        )
     def _stopped_command(
         self,
         *,
@@ -181,6 +218,7 @@ class IntersectionController:
             speed=0,
             override_active=True,
             traffic_light_required=True,
+            stop_line_required=False,
             reset_traffic_light_detector=reset_traffic_light_detector,
             entered_waiting=entered_waiting,
             reason=reason,
@@ -195,8 +233,9 @@ class IntersectionController:
     def update(
         self,
         *,
-        stop_line: StopLineDetection,
+        stop_line: Optional[StopLineDetection],
         traffic_light: Optional[TrafficLightDetection],
+        traffic_light_visible: bool,
         base_steering: float,
         base_speed: int,
         driving_enabled: bool,
@@ -225,6 +264,7 @@ class IntersectionController:
                 speed=0,
                 override_active=True,
                 traffic_light_required=False,
+                stop_line_required=False,
                 reset_traffic_light_detector=True,
                 reason="driving disabled",
             )
@@ -232,18 +272,30 @@ class IntersectionController:
         # -------------------------------------------------------------
         # Normal lane following
         # -------------------------------------------------------------
-        if self.state == IntersectionState.CRUISE:
-            if bool(stop_line.should_stop):
-                self._stopped_steering = planned_steering
+        if self.state == IntersectionState.SEARCHING_RED:
+            red_confirmed = self._signal_confirmed(
+                traffic_light,
+                TrafficLightState.RED,
+                visible=traffic_light_visible,
+                minimum_confidence=self.minimum_green_confidence,
+            )
+
+            if red_confirmed:
+                self._red_seen = True
                 self._transition(
-                    IntersectionState.WAITING_FOR_GREEN,
+                    IntersectionState.APPROACHING_STOP_LINE,
                     current_time,
                 )
 
-                return self._stopped_command(
-                    reason="confirmed stop line: waiting for green",
-                    reset_traffic_light_detector=True,
-                    entered_waiting=True,
+                return IntersectionControlOutput(
+                    state=self.state,
+                    steering=planned_steering,
+                    speed=planned_speed,
+                    override_active=False,
+                    traffic_light_required=True,
+                    stop_line_required=True,
+                    reset_stop_line_detector=True,
+                    reason="stable red detected: stop-line detection armed",
                 )
 
             return IntersectionControlOutput(
@@ -251,34 +303,74 @@ class IntersectionController:
                 steering=planned_steering,
                 speed=planned_speed,
                 override_active=False,
-                traffic_light_required=False,
-                reason="normal lane following",
+                traffic_light_required=True,
+                stop_line_required=False,
+                reason="searching for initial red traffic light",
             )
 
+        #-------------------------------------------------------------
+        # Stop at the line
+        #-------------------------------------------------------------
+        if self.state == IntersectionState.APPROACHING_STOP_LINE:
+            should_stop = bool(
+                stop_line is not None
+                and stop_line.should_stop
+            )
+
+            if should_stop:
+                self._stopped_steering = planned_steering
+                self._transition(
+                    IntersectionState.WAITING_FOR_GREEN,
+                    current_time,
+                )
+
+                return IntersectionControlOutput(
+                    state=self.state,
+                    steering=self._stopped_steering,
+                    speed=0,
+                    override_active=True,
+                    traffic_light_required=True,
+                    stop_line_required=False,
+                    entered_waiting=True,
+                    reason="red seen and nearby stop line confirmed",
+                )
+
+            return IntersectionControlOutput(
+                state=self.state,
+                steering=planned_steering,
+                speed=planned_speed,
+                override_active=False,
+                traffic_light_required=True,
+                stop_line_required=True,
+                reason="red seen: approaching stop line",
+            )
         # -------------------------------------------------------------
         # Full stop until a stable green signal
         # -------------------------------------------------------------
         if self.state == IntersectionState.WAITING_FOR_GREEN:
             green_confirmed = (
-                traffic_light is not None
-                and traffic_light.stable_state
-                == TrafficLightState.GREEN
-                and traffic_light.confidence
-                >= self.minimum_green_confidence
+                self._red_seen
+                and self._signal_confirmed(
+                    traffic_light,
+                    TrafficLightState.GREEN,
+                    visible=traffic_light_visible,
+                    minimum_confidence=self.minimum_green_confidence,
+                )
             )
 
             if not green_confirmed:
-                signal_name = (
-                    "not sampled"
-                    if traffic_light is None
-                    else traffic_light.stable_state.value
-                )
-                return self._stopped_command(
-                    reason=f"waiting for green: signal={signal_name}",
+                return IntersectionControlOutput(
+                    state=self.state,
+                    steering=self._stopped_steering,
+                    speed=0,
+                    override_active=True,
+                    traffic_light_required=True,
+                    stop_line_required=False,
+                    reason="vehicle stopped: waiting for stable green",
                 )
 
             self._transition(
-                IntersectionState.CLEARING_STOP_LINE,
+                IntersectionState.CLEARING_INTERSECTION,
                 current_time,
             )
             self._clear_frames = 0
@@ -289,9 +381,10 @@ class IntersectionController:
                 speed=self._departure_speed(planned_speed),
                 override_active=True,
                 traffic_light_required=False,
+                stop_line_required=True,
                 reset_traffic_light_detector=True,
                 released_on_green=True,
-                reason="stable green: leaving stop line",
+                reason="stable green confirmed: departing",
             )
 
         # -------------------------------------------------------------
@@ -315,18 +408,19 @@ class IntersectionController:
             clearing_age >= self.max_clearing_seconds
         )
 
-        if cleared_by_frames:
-            # clear_reason = (
-            #     f"stop line absent for {self._clear_frames} frames"
-            #     if cleared_by_frames
-            #     else (
-            #         f"clearing timeout after "
-            #         f"{clearing_age:.2f}s"
-            #     )
-            # )
+        if cleared_by_frames or cleared_by_timeout:
+            clear_reason = (
+                f"stop line absent for {self._clear_frames} frames"
+                if cleared_by_frames
+                else (
+                    f"clearing timeout after "
+                    f"{clearing_age:.2f}s"
+                )
+            )
 
+            self._red_seen = False
             self._transition(
-                IntersectionState.CRUISE,
+                IntersectionState.SEARCHING_RED,
                 current_time,
             )
 
@@ -337,7 +431,7 @@ class IntersectionController:
                 override_active=False,
                 traffic_light_required=False,
                 intersection_cleared=True,
-                #reason=clear_reason,
+                reason=clear_reason,
             )
 
         return IntersectionControlOutput(

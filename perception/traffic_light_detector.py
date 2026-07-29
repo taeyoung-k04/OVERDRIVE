@@ -39,7 +39,7 @@ class TrafficLightDetector:
         roi_bottom_ratio: float = 0.70,
         min_area: int = 20,
         min_circularity: float = 0.45,
-        stable_frames: int = 3,
+        stable_frames: int = 2,
     ) -> None:
         self.roi_bottom_ratio = float(roi_bottom_ratio)
         self.min_area = int(min_area)
@@ -78,10 +78,40 @@ class TrafficLightDetector:
             np.array([40, 255, 255]),
         )
 
-        green = cv2.inRange(
+        green_normal = cv2.inRange(
             hsv,
             np.array([40, 80, 70]),
             np.array([90, 255, 255]),
+        )
+
+        # A bright green lamp can be partially clipped toward white. Its hue
+        # remains green, but saturation often falls well below the normal
+        # threshold. Recover those pixels only when green is still measurably
+        # stronger than both red and blue, which rejects neutral white glare.
+        green_bright_hsv = cv2.inRange(
+            hsv,
+            np.array([35, 15, 160]),
+            np.array([100, 110, 255]),
+        )
+        bgr = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+        blue, green_channel, red_channel = cv2.split(
+            bgr.astype(np.int16)
+        )
+        minimum_dominance = np.maximum(
+            4,
+            np.rint(green_channel * 0.03).astype(np.int16),
+        )
+        green_dominant = (
+            (green_channel - red_channel >= minimum_dominance)
+            & (green_channel - blue >= minimum_dominance)
+        ).astype(np.uint8) * 255
+        green_bright = cv2.bitwise_and(
+            green_bright_hsv,
+            green_dominant,
+        )
+        green = cv2.bitwise_or(
+            green_normal,
+            green_bright,
         )
 
         return {
@@ -118,6 +148,9 @@ class TrafficLightDetector:
         best_confidence = 0.0
         best_center: Optional[tuple[int, int]] = None
         best_radius = 0
+        green_fallback: Optional[
+            tuple[float, tuple[int, int], int]
+        ] = None
 
         for state, mask in masks.items():
             mask = cv2.morphologyEx(
@@ -151,6 +184,31 @@ class TrafficLightDetector:
                 )
 
                 if circularity < self.min_circularity:
+                    if state == TrafficLightState.GREEN:
+                        (center_x, center_y), radius = cv2.minEnclosingCircle(
+                            contour
+                        )
+                        if radius >= 2:
+                            area_score = float(
+                                np.clip(
+                                    area / max(self.min_area * 4.0, 1.0),
+                                    0.0,
+                                    1.0,
+                                )
+                            )
+                            fallback_confidence = 0.56 + 0.16 * area_score
+                            if (
+                                green_fallback is None
+                                or fallback_confidence > green_fallback[0]
+                            ):
+                                green_fallback = (
+                                    fallback_confidence,
+                                    (
+                                        int(round(center_x)),
+                                        int(round(center_y)),
+                                    ),
+                                    int(round(radius)),
+                                )
                     continue
 
                 (center_x, center_y), radius = cv2.minEnclosingCircle(
@@ -170,6 +228,22 @@ class TrafficLightDetector:
                         1.0,
                     )
                 )
+                if state == TrafficLightState.GREEN:
+                    # The caller supplies only semantic traffic-light pixels
+                    # and a small surrounding halo. Within that constrained
+                    # region, green area remains reliable when bloom lowers
+                    # the contour's shape score.
+                    area_score = float(
+                        np.clip(
+                            area / max(self.min_area * 4.0, 1.0),
+                            0.0,
+                            1.0,
+                        )
+                    )
+                    confidence = max(
+                        confidence,
+                        0.56 + 0.16 * area_score,
+                    )
 
                 if confidence > best_confidence:
                     best_state = state
@@ -179,6 +253,17 @@ class TrafficLightDetector:
                         int(round(center_y)),
                     )
                     best_radius = int(round(radius))
+
+        # Semantic inference has already restricted this image to a traffic
+        # light and its immediate surroundings. In that narrow region, a
+        # sufficiently large green glow is useful evidence even when bloom,
+        # clipping, or motion blur destroys the lamp's circular contour.
+        if (
+            green_fallback is not None
+            and green_fallback[0] > best_confidence
+        ):
+            best_confidence, best_center, best_radius = green_fallback
+            best_state = TrafficLightState.GREEN
 
         self._history.append(best_state)
 

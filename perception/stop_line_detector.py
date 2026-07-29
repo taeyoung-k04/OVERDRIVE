@@ -428,11 +428,15 @@ class StopLineDetector:
 
         self._close_history.append(bool(close_now))
 
+        recent_history = list(
+            self._close_history
+        )[-self.confirm_frames:]
+
         confirmed = (
-            close_now
-            and len(self._close_history) >= self.confirm_frames
-            and sum(self._close_history) >= self.confirm_frames
-        )
+                len(recent_history) == self.confirm_frames
+                and all(recent_history)
+                )
+        
         should_stop = bool(confirmed)
 
         if best is None:

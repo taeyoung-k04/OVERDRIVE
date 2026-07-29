@@ -16,6 +16,37 @@ from infer_sem_class import (
     make_overlay,
     semantic_to_class_map,
 )
+from utils.lane_detect import (
+    ReferenceLineDetector,
+    draw_reference_line,
+)
+
+
+def draw_reference_status(
+    image: np.ndarray,
+    *,
+    valid: bool,
+    confidence: float,
+    reason: str,
+) -> None:
+    """Draw the current reference-line fitting state."""
+    if valid:
+        text = f"REFERENCE LINE: OK  confidence={confidence:.2f}"
+        color = (70, 255, 70)
+    else:
+        text = f"REFERENCE LINE: LOST  {reason}"
+        color = (0, 80, 255)
+
+    cv2.putText(
+        image,
+        text,
+        (12, image.shape[0] - 18),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
 
 
 def process_batch(
@@ -23,6 +54,7 @@ def process_batch(
     frames: list[np.ndarray],
     imgsz: int,
     device: str,
+    line_detector: ReferenceLineDetector,
 ) -> list[np.ndarray]:
     results = model.predict(
         source=frames,
@@ -31,13 +63,28 @@ def process_batch(
         task="semantic",
         verbose=False,
     )
-    return [
-        make_overlay(
-            frame,
-            semantic_to_class_map(result.semantic_mask, frame.shape[:2]),
+    overlays: list[np.ndarray] = []
+    for frame, result in zip(frames, results):
+        class_map = semantic_to_class_map(
+            result.semantic_mask,
+            frame.shape[:2],
         )
-        for frame, result in zip(frames, results)
-    ]
+        reference_line = line_detector.detect(class_map)
+        overlay = make_overlay(frame, class_map)
+        draw_reference_line(
+            overlay,
+            reference_line,
+            color=(0, 255, 0),
+            thickness=3,
+        )
+        draw_reference_status(
+            overlay,
+            valid=reference_line.valid,
+            confidence=reference_line.confidence,
+            reason=reference_line.reason,
+        )
+        overlays.append(overlay)
+    return overlays
 
 
 def render_video(
@@ -79,6 +126,7 @@ def render_video(
     next_time = 0.0
     frame_step_time = 1.0 / output_fps
     batch: list[np.ndarray] = []
+    line_detector = ReferenceLineDetector()
     progress = tqdm(
         total=total_frames if total_frames > 0 else None,
         desc=source.stem,
@@ -107,14 +155,26 @@ def render_video(
             next_time += frame_step_time
 
             if len(batch) >= batch_size:
-                for overlay in process_batch(model, batch, imgsz, device):
+                for overlay in process_batch(
+                    model,
+                    batch,
+                    imgsz,
+                    device,
+                    line_detector,
+                ):
                     writer.write(overlay)
                     written += 1
                 batch.clear()
                 progress.set_postfix(written=written)
 
         if batch:
-            for overlay in process_batch(model, batch, imgsz, device):
+            for overlay in process_batch(
+                model,
+                batch,
+                imgsz,
+                device,
+                line_detector,
+            ):
                 writer.write(overlay)
                 written += 1
     finally:

@@ -17,6 +17,11 @@ from infer_sem_class import (
     make_overlay,
     semantic_to_class_map,
 )
+from utils.lane_detect import (
+    ReferenceLine,
+    ReferenceLineDetector,
+    draw_reference_line,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -137,6 +142,30 @@ def draw_performance(frame, fps: float, delay: float) -> None:
     )
 
 
+def draw_reference_status(frame, line: ReferenceLine) -> None:
+    """Draw reference-line fitting information on the preview."""
+    if line.valid:
+        text = (
+            f"REFERENCE LINE: OK  "
+            f"slope={line.slope:+.3f}  confidence={line.confidence:.2f}"
+        )
+        color = (70, 255, 70)
+    else:
+        text = f"REFERENCE LINE: LOST  {line.reason}"
+        color = (0, 80, 255)
+
+    cv2.putText(
+        frame,
+        text,
+        (12, frame.shape[0] - 18),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.58,
+        color,
+        2,
+        cv2.LINE_AA,
+    )
+
+
 def main() -> None:
     args = parse_args()
     if (args.width == 0) != (args.height == 0):
@@ -164,6 +193,7 @@ def main() -> None:
     cv2.namedWindow(window_name, cv2.WINDOW_AUTOSIZE)
     previous_time = time.perf_counter()
     measured_fps = 0.0
+    line_detector = ReferenceLineDetector()
 
     try:
         while True:
@@ -187,7 +217,15 @@ def main() -> None:
                 result.semantic_mask,
                 frame.shape[:2],
             )
+            reference_line = line_detector.detect(class_map)
             preview = make_overlay(frame, class_map)
+            draw_reference_line(
+                preview,
+                reference_line,
+                color=(0, 255, 0),
+                thickness=3,
+            )
+            draw_reference_status(preview, reference_line)
 
             now = time.perf_counter()
             elapsed = now - previous_time

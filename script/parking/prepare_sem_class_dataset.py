@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build a semantic-segmentation dataset from parking perspective images."""
+"""Build a semantic-segmentation dataset from YOLO polygon labels."""
 
 from __future__ import annotations
 
@@ -12,9 +12,7 @@ import cv2
 import numpy as np
 
 
-CLASS_NAMES = ("background", "road", "park", "grass", "lane")
-LABEL_TO_ID = {name: index for index, name in enumerate(CLASS_NAMES) if index}
-PAINT_ORDER = ("road", "park", "grass", "lane")
+CLASS_NAMES = ("background", "car", "out", "parking_line", "reference")
 FRAME_RE = re.compile(r"frame_(\d+)s$")
 
 
@@ -25,31 +23,13 @@ def frame_second(path: Path) -> int:
     return int(match.group(1))
 
 
-def read_binary_mask(path: Path, shape: tuple[int, int]) -> np.ndarray:
-    mask = cv2.imread(str(path), cv2.IMREAD_UNCHANGED)
-    if mask is None:
-        raise RuntimeError(f"Could not read mask: {path}")
-    if mask.ndim == 3 and mask.shape[2] == 4:
-        binary = mask[..., 3] > 8
-    elif mask.ndim == 3:
-        binary = np.any(mask[..., :3] > 8, axis=2)
-    else:
-        binary = mask > 8
-    if binary.shape != shape:
-        raise ValueError(
-            f"Mask and perspective image sizes differ: {path} is "
-            f"{binary.shape[::-1]}, expected {shape[::-1]}"
-        )
-    return binary
-
-
 def labeled_frames(label_root: Path) -> list[tuple[str, int]]:
     frames: set[tuple[str, int]] = set()
-    for path in label_root.glob("*/*/*.png"):
-        relative = path.relative_to(label_root)
-        route, label = relative.parts[:2]
-        if label in LABEL_TO_ID:
-            frames.add((route, frame_second(path)))
+    for path in label_root.glob("*/*.txt"):
+        if path.name.endswith("~"):
+            continue
+        route = path.relative_to(label_root).parts[0]
+        frames.add((route, frame_second(path)))
     return sorted(frames)
 
 
@@ -78,16 +58,35 @@ def build_class_map(
     label_root: Path, route: str, second: int, shape: tuple[int, int]
 ) -> np.ndarray:
     class_map = np.zeros(shape, dtype=np.uint8)
-    filename = f"frame_{second:06d}s.png"
-    found = False
-    for label in PAINT_ORDER:
-        path = label_root / route / label / filename
-        if not path.exists():
+    path = label_root / route / f"frame_{second:06d}s.txt"
+    height, width = shape
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(), 1
+    ):
+        fields = raw_line.split()
+        if not fields:
             continue
-        class_map[read_binary_mask(path, shape)] = LABEL_TO_ID[label]
-        found = True
-    if not found:
-        raise FileNotFoundError(f"No masks found for {route}/{filename}")
+        try:
+            source_class = int(fields[0])
+            coordinates = np.asarray(fields[1:], dtype=np.float32)
+        except ValueError as exc:
+            raise ValueError(f"Invalid YOLO polygon at {path}:{line_number}") from exc
+        if not 0 <= source_class < len(CLASS_NAMES) - 1:
+            raise ValueError(
+                f"Unknown class {source_class} at {path}:{line_number}"
+            )
+        if coordinates.size < 6 or coordinates.size % 2:
+            raise ValueError(
+                f"YOLO polygon needs at least 3 x/y points at {path}:{line_number}"
+            )
+        points = coordinates.reshape(-1, 2)
+        points[:, 0] = np.clip(points[:, 0], 0.0, 1.0) * (width - 1)
+        points[:, 1] = np.clip(points[:, 1], 0.0, 1.0) * (height - 1)
+        cv2.fillPoly(
+            class_map,
+            [np.rint(points).astype(np.int32)],
+            source_class + 1,
+        )
     return class_map
 
 
@@ -147,7 +146,7 @@ def build_dataset(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=Path("dataset/parking/perspective"))
+    parser.add_argument("--input", type=Path, default=Path("dataset/parking/frames"))
     parser.add_argument("--label", type=Path, default=Path("dataset/parking/labels"))
     parser.add_argument("--output", type=Path, default=Path("dataset/parking/yolo_parking_sem_class"))
     parser.add_argument("--val-ratio", type=float, default=0.2)

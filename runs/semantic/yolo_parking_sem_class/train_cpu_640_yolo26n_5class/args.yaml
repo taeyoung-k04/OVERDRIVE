@@ -5,7 +5,7 @@ data: dataset\parking\yolo_parking_sem_class\data.yaml
 epochs: 200
 time: null
 patience: 30
-batch: 2
+batch: 4
 imgsz: 640
 save: true
 save_period: -1
@@ -13,7 +13,7 @@ cache: false
 device: cpu
 workers: 8
 project: yolo_parking_sem_class
-name: train_cpu_640_yolo26n_5class-3
+name: train_cpu_640_yolo26n_5class
 exist_ok: false
 pretrained: true
 optimizer: auto
@@ -108,4 +108,4 @@ auto_augment: randaugment
 erasing: 0.4
 cfg: null
 tracker: tracktrack.yaml
-save_dir: C:\Yoon\OVERDRIVE\runs\semantic\yolo_parking_sem_class\train_cpu_640_yolo26n_5class-3
+save_dir: C:\Yoon\OVERDRIVE\runs\semantic\yolo_parking_sem_class\train_cpu_640_yolo26n_5class

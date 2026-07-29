@@ -11,13 +11,13 @@ import numpy as np
 from tqdm import tqdm
 
 
-CLASS_NAMES = ("background", "road", "park", "grass", "lane")
+CLASS_NAMES = ("background", "car", "out", "parking_line", "reference")
 CLASS_TO_ID = {name: index for index, name in enumerate(CLASS_NAMES)}
 COLORS = {
-    CLASS_TO_ID["road"]: (70, 70, 70),
-    CLASS_TO_ID["park"]: (255, 160, 40),
-    CLASS_TO_ID["grass"]: (40, 180, 40),
-    CLASS_TO_ID["lane"]: (0, 230, 255),
+    CLASS_TO_ID["car"]: (255, 0, 255),
+    CLASS_TO_ID["out"]: (70, 70, 70),
+    CLASS_TO_ID["parking_line"]: (0, 230, 255),
+    CLASS_TO_ID["reference"]: (40, 180, 40),
 }
 DEFAULT_WEIGHTS = Path(
     "runs/semantic/yolo_parking_sem_class/"
@@ -35,6 +35,19 @@ def resolve_model_path(weights: Path, backend: str) -> Path:
     if not path.exists():
         raise SystemExit(f"Model file does not exist: {path}")
     return path
+
+
+def load_semantic_model(weights: Path, backend: str):
+    try:
+        from ultralytics import YOLO
+    except ImportError as exc:
+        raise SystemExit(
+            "ultralytics is not installed in the active environment."
+        ) from exc
+
+    model_path = resolve_model_path(weights, backend)
+    print(f"Using {model_path.suffix.lower()[1:]} model: {model_path}")
+    return YOLO(str(model_path), task="semantic")
 
 
 def semantic_to_class_map(semantic: object, shape: tuple[int, int]) -> np.ndarray:
@@ -84,7 +97,7 @@ def save_results(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input", type=Path, default=Path("dataset/parking/perspective"))
+    parser.add_argument("--input", type=Path, default=Path("dataset/parking/frames"))
     parser.add_argument("--weights", type=Path, default=DEFAULT_WEIGHTS)
     parser.add_argument("--backend", choices=("auto", "pt", "onnx"), default="auto")
     parser.add_argument("--output", type=Path, default=Path("result/parking/yolo_sem_class"))
@@ -95,15 +108,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
-    try:
-        from ultralytics import YOLO
-    except ImportError as exc:
-        raise SystemExit(
-            "ultralytics is not installed in the active environment."
-        ) from exc
-
-    model_path = resolve_model_path(args.weights, args.backend)
-    model = YOLO(str(model_path), task="semantic")
+    model = load_semantic_model(args.weights, args.backend)
     sources = sorted(
         path
         for path in args.input.rglob("*")

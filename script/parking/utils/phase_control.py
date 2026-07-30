@@ -20,6 +20,7 @@ class PhaseController:
 
     phase: int = 0
     horizontal_tolerance_deg: float = 1.0
+    phase_0_min_seconds: float = 1.5
     phase_3_reverse_seconds: float = 1.0
     phase_4_stop_seconds: float = 4.0
     phase_5_forward_seconds: float = 1.0
@@ -198,6 +199,11 @@ class PhaseController:
             return self.phase
 
         if parking_lines is None or parking_dot_line is None:
+            return self.phase
+
+        if self.phase_started_at is None:
+            self.phase_started_at = current_time
+        if current_time - self.phase_started_at < self.phase_0_min_seconds:
             return self.phase
 
         dot_count = (

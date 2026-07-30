@@ -1,0 +1,9 @@
+# video_name MM:SS.fraction
+Left_Back 00:00.48
+Left_Back2 00:01.75
+Left_Front 00:01.75
+Left_Front2 00:01.40
+Right_Back 00:00.67
+Right_Back2 00:01.88
+Right_Front 00:00.73
+Right_Front2 00:01.83

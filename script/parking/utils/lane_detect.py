@@ -676,7 +676,7 @@ class ParkingLineDetector(ReferenceLineDetector):
         *,
         class_id: int = CLASS_TO_ID["parking_line"],
         min_component_area: int = 20,
-        max_horizontal_angle_deg: float = 20.0,
+        max_horizontal_angle_deg: float = 10.0,
         **kwargs,
     ) -> None:
         if not 0.0 <= max_horizontal_angle_deg < 90.0:

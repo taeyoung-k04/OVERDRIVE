@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import cv2
@@ -30,6 +31,52 @@ from utils.lane_detect import (
     draw_parking_lines,
 )
 from utils.phase_control import PhaseController
+
+
+START_TIME_PATTERN = re.compile(
+    r"^(?P<minutes>\d+):(?P<seconds>[0-5]\d)\.(?P<fraction>\d{1,3})$"
+)
+
+
+def load_motor_start_times(path: Path) -> dict[str, float]:
+    """Load ``video_name MM:SS.fraction`` motor start times."""
+    if not path.is_file():
+        raise FileNotFoundError(f"Motor start-time file not found: {path}")
+
+    start_times: dict[str, float] = {}
+    for line_number, raw_line in enumerate(
+        path.read_text(encoding="utf-8").splitlines(),
+        start=1,
+    ):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        if len(fields) != 2:
+            raise ValueError(
+                f"{path}:{line_number}: expected 'video_name MM:SS.fraction'"
+            )
+
+        video_name, timestamp = fields
+        match = START_TIME_PATTERN.fullmatch(timestamp)
+        if match is None:
+            raise ValueError(
+                f"{path}:{line_number}: invalid timestamp {timestamp!r}; "
+                "expected MM:SS.fraction (for example 00:00.49)"
+            )
+
+        key = Path(video_name).stem
+        if key in start_times:
+            raise ValueError(
+                f"{path}:{line_number}: duplicate video name {key!r}"
+            )
+        fraction = match.group("fraction")
+        start_times[key] = (
+            int(match.group("minutes")) * 60
+            + int(match.group("seconds"))
+            + int(fraction) / (10 ** len(fraction))
+        )
+    return start_times
 
 
 def draw_phase(image: np.ndarray, phase: int) -> None:
@@ -118,6 +165,7 @@ def process_batch(
     parking_dot_detector: ParkingDotLineDetector,
     parking_line_detector: ParkingLineDetector,
     phase_controller: PhaseController,
+    motor_start_time: float,
 ) -> list[np.ndarray]:
     results = model.predict(
         source=frames,
@@ -151,18 +199,19 @@ def process_batch(
                 parking_dot_line,
                 parking_lines,
             )
-            phase_controller.update(
-                class_map,
-                parking_lines,
-                parking_dot_line,
-                now=frame_time,
-            )
+            if frame_time >= motor_start_time:
+                phase_controller.update(
+                    class_map,
+                    parking_lines,
+                    parking_dot_line,
+                    now=frame_time - motor_start_time,
+                )
         elif phase_controller.phase in (1, 2, 3, 4, 5, 6):
             phase_controller.update(
                 class_map,
                 reference_line=reference_line,
                 out_line=out_line,
-                now=frame_time,
+                now=frame_time - motor_start_time,
             )
         if phase_controller.phase >= 1:
             class_map = remove_car_detections(class_map)
@@ -227,6 +276,7 @@ def render_video(
     batch_size: int,
     width: int,
     height: int,
+    motor_start_time: float,
 ) -> None:
     capture = cv2.VideoCapture(str(source))
     if not capture.isOpened():
@@ -304,6 +354,7 @@ def render_video(
                     parking_dot_detector,
                     parking_line_detector,
                     phase_controller,
+                    motor_start_time,
                 ):
                     writer.write(overlay)
                     written += 1
@@ -323,6 +374,7 @@ def render_video(
                 parking_dot_detector,
                 parking_line_detector,
                 phase_controller,
+                motor_start_time,
             ):
                 writer.write(overlay)
                 written += 1
@@ -371,8 +423,14 @@ def main() -> None:
 
     model = load_semantic_model(args.weights, args.backend)
     sources = sorted(args.input.glob("*.mp4"))
+    start_time_path = args.input / "start.txt"
+    start_times = load_motor_start_times(start_time_path)
 
     for source in sources:
+        if source.stem not in start_times:
+            raise SystemExit(
+                f"{start_time_path}: missing motor start time for {source.name}"
+            )
         render_video(
             model=model,
             source=source,
@@ -383,6 +441,7 @@ def main() -> None:
             batch_size=args.batch,
             width=args.width,
             height=args.height,
+            motor_start_time=start_times[source.stem],
         )
 
 

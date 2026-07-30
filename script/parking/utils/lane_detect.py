@@ -693,10 +693,24 @@ class ParkingLineDetector(ReferenceLineDetector):
             np.deg2rad(max_horizontal_angle_deg)
         )
 
-    @staticmethod
-    def _horizontal_angle(direction: np.ndarray) -> float:
-        angle = abs(float(math.atan2(direction[1], direction[0])))
-        return min(angle, abs(math.pi - angle))
+    def _clip_horizontal_direction(self, direction: np.ndarray) -> np.ndarray:
+        """Clamp a line direction to the configured horizontal angle range."""
+        angle = float(math.atan2(direction[1], direction[0]))
+        signed_horizontal_angle = (
+            (angle + math.pi * 0.5) % math.pi
+            - math.pi * 0.5
+        )
+        clipped_angle = float(
+            np.clip(
+                signed_horizontal_angle,
+                -self.max_horizontal_angle_rad,
+                self.max_horizontal_angle_rad,
+            )
+        )
+        return np.asarray(
+            [math.cos(clipped_angle), math.sin(clipped_angle)],
+            dtype=np.float64,
+        )
 
     def detect(
         self,
@@ -759,13 +773,10 @@ class ParkingLineDetector(ReferenceLineDetector):
                 continue
 
             line, inliers, inlier_ratio = self._robust_fit(sampled)
-            if (
-                line is None
-                or self._horizontal_angle(line[:2])
-                > self.max_horizontal_angle_rad
-            ):
+            if line is None:
                 rejected_count += 1
                 continue
+            line[:2] = self._clip_horizontal_direction(line[:2])
 
             inlier_points = sampled[inliers]
             direction_x = float(line[0])

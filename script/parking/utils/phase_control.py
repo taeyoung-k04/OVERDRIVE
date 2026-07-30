@@ -21,6 +21,7 @@ class PhaseController:
     phase: int = 0
     horizontal_tolerance_deg: float = 1.0
     phase_0_min_seconds: float = 1.5
+    phase_0_max_parking_line_length_px: float = 64.0
     phase_3_reverse_seconds: float = 1.0
     phase_4_stop_seconds: float = 4.0
     phase_5_forward_seconds: float = 1.0
@@ -231,43 +232,62 @@ class PhaseController:
             for label in range(1, count)
             if int(stats[label, cv2.CC_STAT_AREA]) > 0
         ]
-        if len(car_labels) != 1:
+        if len(car_labels) > 1:
             return self.phase
 
-        label = car_labels[0]
-        car_x = int(stats[label, cv2.CC_STAT_LEFT])
-        car_y = int(stats[label, cv2.CC_STAT_TOP])
-        car_width = int(stats[label, cv2.CC_STAT_WIDTH])
-        car_height = int(stats[label, cv2.CC_STAT_HEIGHT])
-        car_right_x = car_x + car_width
-        car_bottom_y = car_y + car_height
+        candidate_lines = [
+            line
+            for line in parking_lines.lines
+            if line.segment is not None
+        ]
+        if len(car_labels) == 1:
+            label = car_labels[0]
+            car_x = float(stats[label, cv2.CC_STAT_LEFT])
+            car_right_x = car_x + float(
+                stats[label, cv2.CC_STAT_WIDTH]
+            )
+            car_bottom_y = float(
+                stats[label, cv2.CC_STAT_TOP]
+                + stats[label, cv2.CC_STAT_HEIGHT]
+            )
+            lines_below_car = []
+            for line in candidate_lines:
+                if line.point is None or line.direction is None:
+                    continue
+                segment_left = min(point[0] for point in line.segment)
+                segment_right = max(point[0] for point in line.segment)
+                overlap_left = max(car_x, float(segment_left))
+                overlap_right = min(car_right_x, float(segment_right))
+                if overlap_left > overlap_right:
+                    continue
+                direction_x = float(line.direction[0])
+                if abs(direction_x) < 1e-6:
+                    continue
+                sample_x = (overlap_left + overlap_right) * 0.5
+                scale = (
+                    sample_x - float(line.point[0])
+                ) / direction_x
+                line_y = float(
+                    line.point[1] + scale * line.direction[1]
+                )
+                if line_y >= car_bottom_y:
+                    lines_below_car.append(line)
+            candidate_lines = lines_below_car
 
-        line_below_car = False
-        for line in parking_lines.lines:
-            if (
-                line.point is None
-                or line.direction is None
-                or line.segment is None
-            ):
-                continue
-            segment_left = min(point[0] for point in line.segment)
-            segment_right = max(point[0] for point in line.segment)
-            overlap_left = max(float(car_x), float(segment_left))
-            overlap_right = min(float(car_right_x), float(segment_right))
-            if overlap_left > overlap_right:
-                continue
-
-            sample_x = (overlap_left + overlap_right) * 0.5
-            direction_x = float(line.direction[0])
-            if abs(direction_x) < 1e-6:
-                continue
-            scale = (sample_x - float(line.point[0])) / direction_x
-            line_y = float(line.point[1] + scale * line.direction[1])
-            if line_y >= car_bottom_y:
-                line_below_car = True
-                break
-
-        if not line_below_car:
+        longest_parking_line_length = max(
+            (
+                math.hypot(
+                    float(line.segment[1][0] - line.segment[0][0]),
+                    float(line.segment[1][1] - line.segment[0][1]),
+                )
+                for line in candidate_lines
+            ),
+            default=0.0,
+        )
+        if (
+            longest_parking_line_length
+            <= self.phase_0_max_parking_line_length_px
+        ):
             self.phase = 1
             self.phase_started_at = current_time
         return self.phase

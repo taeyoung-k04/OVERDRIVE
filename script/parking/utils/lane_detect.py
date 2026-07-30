@@ -471,13 +471,13 @@ class ParkingDotLineDetector(ReferenceLineDetector):
     def _leftmost_component_points(
         self,
         mask: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, int]:
-        """Return one leftmost point for every valid connected component."""
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+        """Return fit candidates and pre-fit outliers from valid components."""
         count, labels, stats, _ = cv2.connectedComponentsWithStats(
             mask,
             connectivity=8,
         )
-        points: list[tuple[float, float]] = []
+        components: list[dict[str, float]] = []
         selected_mask = np.zeros_like(mask, dtype=np.uint8)
 
         for label in range(1, count):
@@ -492,20 +492,57 @@ class ParkingDotLineDetector(ReferenceLineDetector):
             left_x = int(np.min(component_xs))
             left_ys = component_ys[component_xs == left_x]
             left_y = float(np.median(left_ys))
-            points.append((float(left_x), left_y))
+            components.append(
+                {
+                    "x": float(left_x),
+                    "y": left_y,
+                    "right": float(np.max(component_xs)),
+                    "top": float(np.min(component_ys)),
+                    "bottom": float(np.max(component_ys)),
+                }
+            )
             selected_mask[labels == label] = 1
 
-        if not points:
+        if not components:
+            empty = np.empty((0, 2), dtype=np.float64)
             return (
-                np.empty((0, 2), dtype=np.float64),
+                empty,
+                empty.copy(),
                 selected_mask,
                 0,
             )
 
+        fit_points: list[tuple[float, float]] = []
+        pre_rejected_points: list[tuple[float, float]] = []
+        for component in components:
+            has_left_component_at_same_y = any(
+                other["right"] < component["x"]
+                and other["top"] <= component["bottom"]
+                and component["top"] <= other["bottom"]
+                for other in components
+                if other is not component
+            )
+            destination = (
+                pre_rejected_points
+                if has_left_component_at_same_y
+                else fit_points
+            )
+            destination.append((component["x"], component["y"]))
+
         # Stable ordering makes debug output and fitting deterministic.
-        point_array = np.asarray(points, dtype=np.float64)
-        order = np.lexsort((point_array[:, 0], point_array[:, 1]))
-        return point_array[order], selected_mask, len(points)
+        def ordered(points: list[tuple[float, float]]) -> np.ndarray:
+            if not points:
+                return np.empty((0, 2), dtype=np.float64)
+            point_array = np.asarray(points, dtype=np.float64)
+            order = np.lexsort((point_array[:, 0], point_array[:, 1]))
+            return point_array[order]
+
+        return (
+            ordered(fit_points),
+            ordered(pre_rejected_points),
+            selected_mask,
+            len(components),
+        )
 
     @staticmethod
     def _orthogonal_residuals(
@@ -592,7 +629,7 @@ class ParkingDotLineDetector(ReferenceLineDetector):
         mask[:roi_top] = 0
         mask = self._clean_dot_mask(mask)
 
-        points, selected_mask, component_count = (
+        points, pre_rejected_points, selected_mask, component_count = (
             self._leftmost_component_points(mask)
         )
 
@@ -614,16 +651,23 @@ class ParkingDotLineDetector(ReferenceLineDetector):
                 ),
             )
 
-        line, inliers, inlier_ratio = self._fit_remove_outliers_refit(
+        line, inliers, _ = self._fit_remove_outliers_refit(
             points,
             width,
+        )
+        rejected_points = np.concatenate(
+            (pre_rejected_points, points[~inliers]),
+            axis=0,
+        )
+        total_inlier_ratio = (
+            float(np.count_nonzero(inliers)) / component_count
         )
         if line is None:
             return Line(
                 valid=False,
-                confidence=float(inlier_ratio),
+                confidence=total_inlier_ratio,
                 points=points[inliers],
-                rejected_points=points[~inliers],
+                rejected_points=rejected_points,
                 mask=selected_mask,
                 reason=(
                     f"parking_dot_line fit rejected: "
@@ -639,14 +683,18 @@ class ParkingDotLineDetector(ReferenceLineDetector):
             else 0.0
         )
         confidence = float(
-            np.clip(0.75 * inlier_ratio + 0.25 * coverage, 0.0, 1.0)
+            np.clip(
+                0.75 * total_inlier_ratio + 0.25 * coverage,
+                0.0,
+                1.0,
+            )
         )
 
         return self._line_observation(
             line,
             confidence=confidence,
             points=inlier_points,
-            rejected_points=points[~inliers],
+            rejected_points=rejected_points,
             mask=selected_mask,
             reason=(
                 f"parking_dot_line fitted from "
